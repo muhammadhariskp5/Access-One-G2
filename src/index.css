@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  --animate-progress-bar: progress-bar 2s ease-in-out infinite;
+
+  @keyframes progress-bar {
+    0% { transform: scaleX(0); }
+    50% { transform: scaleX(0.7); }
+    100% { transform: scaleX(1); opacity: 0; }
+  }
+}
+
+/* Custom compact scrollbar & font smoothing */
+@layer base {
+  body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+/* Printable PDF & Background Styling Rules */
+@media print {
+  /* Force browsers and PDF printers to preserve exact background colors, gradients, and images */
+  *,
+  *::before,
+  *::after {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }
+
+  /* Hide navigation, sidebar, filter controls, global toast, and interactive action buttons during print */
+  aside,
+  header,
+  nav,
+  .no-print,
+  button:not(.printable-button) {
+    display: none !important;
+  }
+
+  /* Reset body & wrapper backgrounds for clean page printing */
+  body, #root {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    color: #1a1a1a !important;
+  }
+
+  /* Remove sidebar offset when printing full page */
+  .ml-52 {
+    margin-left: 0 !important;
+  }
+
+  /* Expand main container to full width */
+  .printable-area {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  /* Prevent card breaking across PDF page splits */
+  .page-break-inside-avoid,
+  .printable-card,
+  table tr,
+  .bg-white.rounded-3xl {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Custom badge card print enhancement */
+  .print-badge-card {
+    border: 2px solid #800020 !important;
+    background-color: #ffffff !important;
+    border-radius: 1rem !important;
+    padding: 1.25rem !important;
+  }
+}
+

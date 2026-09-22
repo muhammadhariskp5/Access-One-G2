@@ -1,6 +1,8 @@
 {
-  "name": "AccessOne",
-  "description": "Industrial gate pass and access management system.",
+  "name": "Remix AccessOne",
+  "description": "AccessOne by Techsandgadgets.com - A comprehensive system for managing industrial gate passes, training prerequisites, and complex access logic.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

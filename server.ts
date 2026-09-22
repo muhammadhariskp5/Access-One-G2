@@ -600,7 +600,7 @@ function verifySessionToken(token) {
     });
 
     // API routes FIRST
-    app.get("/api/health", authorize(), async (req, res) => {
+    app.get("/api/health", async (req, res) => {
       let connection;
       try {
         connection = await getConnection();
@@ -4121,7 +4121,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
   });
 
-  app.get("/api/settings/company", authorize(['admin', 'approver', 'applier', 'viewer', 'requester']), async (req, res) => {
+  app.get("/api/settings/company", async (req, res) => {
     let connection;
     try {
       connection = await getConnection();

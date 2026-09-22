@@ -1,0 +1,917 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { 
+  ShieldCheck, 
+  Eye, 
+  EyeOff,
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Employee, 
+  Location, 
+  Category,
+  AccessCode, 
+  Pass, 
+  UserProfile, 
+  UserRole,
+  BrandingSettings,
+  PassApplication,
+  AuditLog,
+  Division,
+  Project,
+  Department,
+  isPowerAdmin
+} from './types';
+import { apiFetch, cn } from './lib/utils';
+
+// --- Components ---
+import { Modal } from './components/common/Modal';
+import { Toast } from './components/common/Toast';
+import { ConfirmModal } from './components/common/ConfirmModal';
+import { Sidebar } from './components/layout/Sidebar';
+import { Navbar } from './components/layout/Navbar';
+
+// --- Pages ---
+import { Dashboard } from './pages/Dashboard';
+import { Employees } from './pages/Employees';
+import { Resources } from './pages/Resources';
+import { AccessMatrix } from './pages/AccessMatrix';
+import { Settings } from './pages/Settings';
+import { Passes } from './pages/Passes';
+import { AuditLogs } from './pages/AuditLogs';
+import { EmployeeDetail } from './pages/EmployeeDetail';
+import { ApplicationDetail } from './pages/ApplicationDetail';
+import { SaaSAdminPortal } from './pages/SaaSAdminPortal';
+import { MaintenanceBanner } from './components/layout/MaintenanceBanner';
+
+// --- Forms ---
+import { ResetPasswordForm } from './components/settings/ResetPasswordForm';
+import { EmployeeForm } from './components/employees/EmployeeForm';
+import { LocationForm } from './components/resources/LocationForm';
+import { AccessCodeForm } from './components/resources/AccessCodeForm';
+
+export default function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem('user');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      console.error('Corrupted user session data, clearing.', e);
+      localStorage.removeItem('user');
+      return null;
+    }
+  });
+  const [company, setCompany] = useState<BrandingSettings | null>(null);
+  const [globalSearch, setGlobalSearch] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  
+  // Data State
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [applications, setApplications] = useState<PassApplication[]>([]);
+  const [passes, setPasses] = useState<Pass[]>([]);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [accessCodes, setAccessCodes] = useState<AccessCode[]>([]);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [divisions, setDivisions] = useState<Division[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+
+  // Modal States
+  const [isPassModalOpen, setIsPassModalOpen] = useState(false);
+  const [isEmployeeModalOpen, setIsEmployeeModalOpen] = useState(false);
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [isCodeModalOpen, setIsCodeModalOpen] = useState(false);
+  const [locationModalMode, setLocationModalMode] = useState<'manual' | 'import'>('manual');
+  const [codeModalMode, setCodeModalMode] = useState<'manual' | 'import'>('manual');
+  const [selectedLocationForCode, setSelectedLocationForCode] = useState<string | null>(null);
+  const [selectedPass, setSelectedPass] = useState<Pass | null>(null);
+  const [passModalType, setPassModalType] = useState<'issue' | 'application'>('issue');
+  
+  // Toast State
+  const [toast, setToast] = useState<{ 
+    message: string, 
+    type: 'success' | 'error',
+    onRetry?: () => void,
+    reason?: string
+  } | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isFetching, setIsFetching] = useState(false);
+
+  // Requirement 10: Session Security - Auto logout after 30 minutes of inactivity
+  useEffect(() => {
+    if (!user) return;
+
+    let timeoutId: NodeJS.Timeout;
+
+    const resetTimer = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        handleLogout();
+        setToast({ message: "Session expired due to inactivity", type: 'error' });
+      }, 30 * 60 * 1000); // 30 minutes
+    };
+
+    const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
+    events.forEach(event => window.addEventListener(event, resetTimer));
+    
+    resetTimer(); // Initial start
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      events.forEach(event => window.removeEventListener(event, resetTimer));
+    };
+  }, [user]);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setConfirmModal({ isOpen: true, title, message, onConfirm });
+  };
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success', onRetry?: () => void, reason?: string) => {
+    setToast({ message, type, onRetry, reason });
+    if (type === 'success' && !onRetry) {
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
+  
+  // Auth Form State
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [nameAvailable, setNameAvailable] = useState<boolean | null>(null);
+  const [emailAvailable, setEmailAvailable] = useState<boolean | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+
+  const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'error'>('checking');
+  const [dbErrorMessage, setDbErrorMessage] = useState('');
+
+  const checkDbStatus = async () => {
+    try {
+      const res = await apiFetch('/api/health');
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+      if (data.dbConnected) {
+        setDbStatus('connected');
+      } else {
+        setDbStatus('error');
+        setDbErrorMessage(data.error || 'Database connection failed');
+      }
+    } catch (err: any) {
+      setDbStatus('error');
+      setDbErrorMessage(err.message || 'Failed to connect to server');
+    }
+  };
+
+  useEffect(() => {
+    checkDbStatus();
+    // Preload system settings for global branding and maintenance broadcast banner
+    apiFetch('/api/settings/company')
+      .then(res => res.ok ? res.json() : null)
+      .then(comp => {
+        if (comp && typeof comp === 'object' && !Array.isArray(comp)) {
+          setCompany(comp);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (company) {
+      document.title = company.appName || 'AccessOne';
+      if (company.appLogoUrl) {
+        const link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
+        if (link) {
+          link.href = company.appLogoUrl;
+        }
+      }
+    }
+  }, [company]);
+
+  // --- Data Fetching ---
+  const hadDataErrorRef = useRef(false);
+  const fetchSeqRef = useRef(0);
+  const safeFetch = async (url: string, fallback: any): Promise<{ value: any; ok: boolean }> => {
+    try {
+      const r = await apiFetch(url);
+      if (r.ok) return { value: await r.json(), ok: true };
+      return { value: fallback, ok: false };
+    } catch (e) {
+      return { value: fallback, ok: false };
+    }
+  };
+
+  const fetchData = async () => {
+    if (!user) return;
+    const mySeq = ++fetchSeqRef.current;
+    setIsFetching(true);
+    try {
+      const results = await Promise.all([
+        safeFetch('/api/employees', []),
+        safeFetch('/api/passes', []),
+        safeFetch('/api/passApplications', []),
+        safeFetch('/api/locations', []),
+        safeFetch('/api/categories', []),
+        safeFetch('/api/accessCodes', []),
+        safeFetch('/api/settings/company', null),
+        safeFetch('/api/users', []),
+        safeFetch('/api/auditLogs', []),
+        safeFetch('/api/divisions', []),
+        safeFetch('/api/projects', []),
+        safeFetch('/api/departments', [])
+      ]);
+      const [emps, pss, reqs, locs, cats, grps, comp, usrs, logs, divs, projs, depts] = results.map(r => r.value);
+      const hadError = results.some(r => !r.ok);
+
+      if (mySeq !== fetchSeqRef.current) return; // a newer fetch has already started/finished; discard this stale result
+
+      setEmployees(Array.isArray(emps) ? emps : []);
+      setPasses(Array.isArray(pss) ? pss : []);
+      setApplications(Array.isArray(reqs) ? reqs : []);
+      setLocations(Array.isArray(locs) ? locs : []);
+      setCategories(Array.isArray(cats) ? cats : []);
+      setAccessCodes(Array.isArray(grps) ? grps : []);
+      setCompany(comp && typeof comp === 'object' && !Array.isArray(comp) ? comp : null);
+      setAllUsers(Array.isArray(usrs) ? usrs : []);
+      setAuditLogs(Array.isArray(logs) ? logs : []);
+      setDivisions(Array.isArray(divs) ? divs : []);
+      setProjects(Array.isArray(projs) ? projs : []);
+      setDepartments(Array.isArray(depts) ? depts : []);
+
+      if (hadError) {
+        if (!hadDataErrorRef.current) {
+          showToast('Some data failed to load. Showing the latest available information.', 'error');
+        }
+        hadDataErrorRef.current = true;
+      } else {
+        hadDataErrorRef.current = false;
+      }
+    } catch (err) {
+      console.error("Failed to fetch data:", err);
+      if (!hadDataErrorRef.current) {
+        showToast('Failed to load data. Please check your connection.', 'error');
+      }
+      hadDataErrorRef.current = true;
+    } finally {
+      setIsLoading(false);
+      setIsFetching(false);
+    }
+  };
+
+  // Targeted single-endpoint fetch for audit logs (prevents refetching all 12 collections)
+  const fetchAuditLogs = async () => {
+    if (!user) return;
+    try {
+      const res = await apiFetch('/api/auditLogs');
+      if (res.ok) {
+        const logs = await res.json();
+        setAuditLogs(Array.isArray(logs) ? logs : []);
+        return logs;
+      }
+    } catch (err) {
+      console.error("Failed to fetch audit logs:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      fetchData();
+      
+      // Smart background polling: only poll if tab is visible, at a conservative 30s interval
+      // Dedicated views (like Audit Logs) have configurable high-speed polling with UI toggles
+      const interval = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          fetchData();
+        }
+      }, 30000);
+
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          fetchData();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
+      return () => {
+        clearInterval(interval);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+    } else {
+      setIsLoading(false);
+    }
+  }, [user]);
+
+  // Presence Tracking & Heartbeat
+  useEffect(() => {
+    if (!user) return;
+
+    const sendHeartbeat = async () => {
+      try {
+        await apiFetch('/api/presence/heartbeat', {
+          method: 'POST',
+          body: JSON.stringify({
+            userId: user.id,
+            email: user.email,
+            displayName: user.displayName || user.name || user.email,
+            userName: user.userName || user.displayName || user.name || user.email,
+            role: user.role,
+            department: user.department,
+            jobTitle: user.jobTitle,
+            currentPage: location.pathname
+          })
+        });
+      } catch (err) {
+        // Silent catch for presence heartbeat
+      }
+    };
+
+    // Send immediate heartbeat on route change / user load
+    sendHeartbeat();
+
+    // Regular 25s heartbeat when tab is active
+    const heartbeatInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        sendHeartbeat();
+      }
+    }, 25000);
+
+    const handlePresenceVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        sendHeartbeat();
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      try {
+        const payload = JSON.stringify({ userId: user.id });
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon('/api/presence/logout', new Blob([payload], { type: 'application/json' }));
+        }
+      } catch (e) {}
+    };
+
+    document.addEventListener('visibilitychange', handlePresenceVisibility);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      clearInterval(heartbeatInterval);
+      document.removeEventListener('visibilitychange', handlePresenceVisibility);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [user, location.pathname]);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only trigger if Alt is pressed and not in an input/textarea (unless it's Alt+F for search)
+      const isInput = ['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName);
+      
+      if (e.altKey) {
+        switch (e.key.toLowerCase()) {
+          case 'd':
+            e.preventDefault();
+            navigate('/');
+            break;
+          case 'a':
+            e.preventDefault();
+            navigate('/applications');
+            break;
+          case 'm':
+            e.preventDefault();
+            navigate('/matrix');
+            break;
+          case 'e':
+            e.preventDefault();
+            navigate('/employees');
+            break;
+          case 'l':
+            e.preventDefault();
+            navigate('/resources');
+            break;
+          case 's':
+            e.preventDefault();
+            navigate('/settings');
+            break;
+          case 'u':
+            if (user?.role === 'admin') {
+              e.preventDefault();
+              navigate('/audit');
+            }
+            break;
+          case 'f':
+            e.preventDefault();
+            const searchInput = (document.getElementById('header-global-search') || document.querySelector('input[type="text"][placeholder*="Search"]')) as HTMLInputElement;
+            if (searchInput) {
+              searchInput.focus();
+              searchInput.select();
+            }
+            break;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [navigate, user]);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    const trimmedEmail = authEmail.trim().toLowerCase();
+    const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const body = authMode === 'login' 
+      ? { email: trimmedEmail, password: authPassword }
+      : { email: trimmedEmail, password: authPassword, displayName: authName };
+
+    try {
+      const res = await apiFetch(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Authentication failed');
+      
+      if (authMode === 'register') {
+        setAuthMode('login');
+        setAuthError('Registration successful! Please wait for admin approval.');
+        return;
+      }
+      
+      setUser(data);
+      localStorage.setItem('user', JSON.stringify(data));
+      navigate('/');
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    if (user?.id) {
+      apiFetch('/api/presence/logout', {
+        method: 'POST',
+        body: JSON.stringify({ userId: user.id })
+      }).catch(() => {});
+    }
+    setUser(null);
+    localStorage.removeItem('user');
+    navigate('/');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F8F9FA]">
+        <motion.div 
+          animate={{ rotate: 360 }} 
+          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+          className="w-12 h-12 border-4 border-[#800020]/20 border-t-[#800020] rounded-full"
+        />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen flex flex-col justify-center items-center bg-[#F8F9FA] p-6 relative">
+        <MaintenanceBanner company={company} className="fixed top-0 left-0 right-0" />
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-12 rounded-[40px] shadow-2xl border border-[#E5E7EB] max-w-md w-full"
+        >
+          <div className="w-20 h-20 bg-[#800020]/10 rounded-3xl flex items-center justify-center mx-auto mb-4 overflow-hidden">
+            {company?.appLogoUrl ? (
+              <img src={company.appLogoUrl} alt="App Logo" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+            ) : (
+              <ShieldCheck size={40} className="text-[#800020]" />
+            )}
+          </div>
+          <div className="text-center mb-8">
+            <h1 className="text-2xl font-bold text-[#1A1A1A] tracking-tight leading-none">
+              {company?.appName || 'AccessOne'}
+            </h1>
+            <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest mt-1">
+              {company?.poweredBy || 'by Techsandgadgets.com'}
+            </p>
+          </div>
+          <h1 className="text-3xl font-bold text-[#1A1A1A] mb-2 tracking-tight text-center">
+            {authMode === 'login' ? 'Welcome Back' : 'Create Account'}
+          </h1>
+          
+          <form onSubmit={handleAuth} className="space-y-4">
+            {authMode === 'register' && (
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Full Name</label>
+                <input 
+                  required 
+                  type="text" 
+                  value={authName}
+                  onChange={e => setAuthName(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] focus:border-[#800020] outline-none font-medium text-sm transition-all" 
+                  placeholder="John Doe"
+                />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Email Address</label>
+              <input 
+                required 
+                type="email" 
+                value={authEmail}
+                onChange={e => setAuthEmail(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] focus:border-[#800020] outline-none font-medium text-sm transition-all" 
+                placeholder="name@company.com"
+              />
+            </div>
+            <div className="space-y-1.5 relative">
+              <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Password</label>
+              <div className="relative">
+                <input 
+                  required 
+                  type={showPassword ? "text" : "password"} 
+                  value={authPassword}
+                  onChange={e => setAuthPassword(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-sm pr-10" 
+                  placeholder="••••••••"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#6B7280]"
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </div>
+            
+            {authError && (
+              <p className="text-xs text-red-600 font-bold bg-red-50 p-3 rounded-xl border border-red-100">
+                {authError}
+              </p>
+            )}
+
+            <button 
+              type="submit"
+              className="w-full bg-[#1A1A1A] text-white py-4 rounded-2xl font-bold hover:bg-black transition-all shadow-lg shadow-black/10"
+            >
+              {authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+
+          <div className="mt-8 text-center space-y-4">
+            <button 
+              onClick={() => {
+                setAuthMode(authMode === 'login' ? 'register' : 'login');
+                setAuthError('');
+              }}
+              className="text-sm font-bold text-[#800020] hover:underline block w-full"
+            >
+              {authMode === 'login' ? "Don't have an account? Register" : "Already have an account? Sign In"}
+            </button>
+            {authMode === 'login' && (
+              <button 
+                onClick={() => setIsResetModalOpen(true)}
+                className="text-xs font-bold text-[#6B7280] hover:text-[#800020]"
+              >
+                Forgot Password?
+              </button>
+            )}
+          </div>
+        </motion.div>
+
+        <Modal isOpen={isResetModalOpen} onClose={() => setIsResetModalOpen(false)} title="Reset Password">
+          <ResetPasswordForm onClose={() => setIsResetModalOpen(false)} showToast={showToast} />
+        </Modal>
+      </div>
+    );
+  }
+
+  // Dedicated SaaS Master Control Portal (Completely standalone page for Power Admin / Vendor Root)
+  if (isPowerAdmin(user)) {
+    return (
+      <div className="min-h-screen bg-[#F8F9FA] text-slate-900 flex flex-col font-sans">
+        <MaintenanceBanner company={company} />
+        <SaaSAdminPortal
+          user={user}
+          company={company}
+          handleLogout={handleLogout}
+          showToast={showToast}
+          showConfirm={showConfirm}
+        />
+
+        <ConfirmModal 
+          isOpen={confirmModal.isOpen}
+          onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+          title={confirmModal.title}
+          message={confirmModal.message}
+          onConfirm={confirmModal.onConfirm}
+        />
+
+        {toast && (
+          <Toast 
+            message={toast.message} 
+            type={toast.type} 
+            reason={toast.reason}
+            onClose={() => setToast(null)} 
+            onRetry={toast.onRetry}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8F9FA] flex flex-col">
+      <MaintenanceBanner company={company} />
+      <div className="flex-1 flex">
+        {/* Connectivity Alert */}
+      {!isOnline && (
+        <div className="fixed top-0 left-0 right-0 z-[100] bg-[#800020] text-white py-1 px-4 text-[10px] font-bold text-center animate-in slide-in-from-top duration-300">
+          You are currently offline. Some features may be unavailable.
+        </div>
+      )}
+
+      {/* Progress Bar */}
+      {isFetching && (
+        <div className="fixed top-0 left-0 right-0 z-[101] h-0.5 bg-transparent overflow-hidden">
+          <div className="h-full bg-[#800020] animate-progress-bar origin-left"></div>
+        </div>
+      )}
+
+      <Sidebar user={user} company={company} handleLogout={handleLogout} />
+
+      <div className="flex-1 ml-52 flex flex-col min-h-screen bg-slate-50/70">
+        <Navbar 
+          user={user} 
+          company={company} 
+          globalSearch={globalSearch} 
+          setGlobalSearch={setGlobalSearch} 
+          employees={employees} 
+          handleLogout={handleLogout}
+        />
+
+        <div className="p-4 flex-1 flex flex-col min-h-[calc(100vh-64px)]">
+          <AnimatePresence mode="wait">
+            <div className="flex-1 flex flex-col w-full min-h-[calc(100vh-96px)]">
+              <Routes>
+              <Route path="/" element={
+                <Dashboard 
+                  employees={employees} 
+                  passes={passes} 
+                  applications={applications}
+                  locations={locations} 
+                  categories={categories}
+                  company={company}
+                  globalSearch={globalSearch}
+                  allUsers={allUsers}
+                />
+              } />
+              <Route path="/applications" element={
+                user?.role !== 'viewer' ? (
+                  <Passes 
+                    view="applications"
+                    passes={passes}
+                    applications={applications}
+                    employees={employees}
+                    locations={locations}
+                    categories={categories}
+                    accessCodes={accessCodes}
+                    projects={projects}
+                    divisions={divisions}
+                    departments={departments}
+                    allUsers={allUsers}
+                    currentUser={user}
+                    onSuccess={fetchData}
+                    globalSearch={globalSearch}
+                    showToast={showToast}
+                    showConfirm={showConfirm}
+                  />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              } />
+              <Route path="/applications/:id" element={
+                user?.role !== 'viewer' ? (
+                  <ApplicationDetail 
+                    applications={applications}
+                    passes={passes}
+                    employees={employees}
+                    locations={locations}
+                    categories={categories}
+                    accessCodes={accessCodes}
+                    projects={projects}
+                    divisions={divisions}
+                    departments={departments}
+                    allUsers={allUsers}
+                    currentUser={user}
+                    onSuccess={fetchData}
+                    globalSearch={globalSearch}
+                    showToast={showToast}
+                    showConfirm={showConfirm}
+                  />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              } />
+              <Route path="/status-management" element={
+                user?.role !== 'viewer' ? (
+                  <Passes 
+                    view="status-management"
+                    passes={passes}
+                    applications={applications}
+                    employees={employees}
+                    locations={locations}
+                    categories={categories}
+                    accessCodes={accessCodes}
+                    projects={projects}
+                    divisions={divisions}
+                    departments={departments}
+                    allUsers={allUsers}
+                    currentUser={user}
+                    onSuccess={fetchData}
+                    globalSearch={globalSearch}
+                    showToast={showToast}
+                    showConfirm={showConfirm}
+                  />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              } />
+              <Route path="/matrix" element={
+                <AccessMatrix 
+                  employees={employees}
+                  passes={passes}
+                  locations={locations}
+                  categories={categories}
+                  accessCodes={accessCodes}
+                  globalSearch={globalSearch}
+                />
+              } />
+              <Route path="/employees" element={
+                <Employees 
+                  employees={employees} 
+                  passes={passes}
+                  applications={applications}
+                  divisions={divisions}
+                  departments={departments}
+                  projects={projects}
+                  onSuccess={fetchData}
+                  globalSearch={globalSearch}
+                  currentUser={user}
+                  showToast={showToast}
+                  showConfirm={showConfirm}
+                />
+              } />
+              <Route path="/employees/:id" element={
+                <EmployeeDetail 
+                  employees={employees}
+                  passes={passes}
+                  locations={locations}
+                  accessCodes={accessCodes}
+                  divisions={divisions}
+                  departments={departments}
+                  projects={projects}
+                  currentUser={user}
+                  onSuccess={fetchData}
+                  showToast={showToast}
+                  showConfirm={showConfirm}
+                />
+              } />
+              <Route path="/resources" element={
+                <Resources 
+                  locations={locations} 
+                  categories={categories}
+                  accessCodes={accessCodes}
+                  divisions={divisions}
+                  departments={departments}
+                  projects={projects}
+                  globalSearch={globalSearch}
+                  currentUser={user}
+                  onSuccess={fetchData}
+                  showToast={showToast}
+                  showConfirm={showConfirm}
+                />
+              } />
+              <Route path="/settings" element={
+                <Settings 
+                  company={company}
+                  allUsers={allUsers}
+                  currentUser={user}
+                  divisions={divisions}
+                  projects={projects}
+                  departments={departments}
+                  onSuccess={fetchData}
+                  globalSearch={globalSearch}
+                  showToast={showToast}
+                  showConfirm={showConfirm}
+                />
+              } />
+              <Route path="/audit" element={
+                user.role === 'admin' ? (
+                  <AuditLogs 
+                    logs={auditLogs} 
+                    globalSearch={globalSearch}
+                    allUsers={allUsers}
+                    currentUser={user}
+                    divisions={divisions}
+                    projects={projects}
+                    departments={departments}
+                    onSuccess={fetchData}
+                    onRefreshAuditLogs={fetchAuditLogs}
+                    showToast={showToast}
+                    showConfirm={showConfirm}
+                  />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              } />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </div>
+        </AnimatePresence>
+      </div>
+      </div>
+      </div>
+
+      {/* Global Modals */}
+      <Modal isOpen={isEmployeeModalOpen} onClose={() => setIsEmployeeModalOpen(false)} title="Add New Employee">
+        <EmployeeForm 
+          employees={employees} 
+          divisions={divisions}
+          departments={departments}
+          projects={projects}
+          onClose={() => setIsEmployeeModalOpen(false)} 
+          onSuccess={fetchData} 
+        />
+      </Modal>
+
+      <Modal isOpen={isLocationModalOpen} onClose={() => setIsLocationModalOpen(false)} title={locationModalMode === 'import' ? "Import Locations" : "Add Location"}>
+        <LocationForm 
+          mode={locationModalMode}
+          categories={categories} 
+          onClose={() => setIsLocationModalOpen(false)} 
+          onSuccess={fetchData} 
+          showToast={showToast}
+        />
+      </Modal>
+
+      <Modal isOpen={isCodeModalOpen} onClose={() => setIsCodeModalOpen(false)} title={codeModalMode === 'import' ? "Import Access Codes" : "Add Access Code"}>
+        <AccessCodeForm 
+          mode={codeModalMode}
+          locationId={selectedLocationForCode || ''} 
+          locations={locations}
+          categories={categories}
+          onClose={() => setIsCodeModalOpen(false)} 
+          onSuccess={fetchData} 
+          showToast={showToast}
+        />
+      </Modal>
+
+      <ConfirmModal 
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        onConfirm={confirmModal.onConfirm}
+      />
+
+      {toast && (
+        <Toast 
+          message={toast.message} 
+          type={toast.type} 
+          reason={toast.reason}
+          onClose={() => setToast(null)} 
+          onRetry={toast.onRetry}
+        />
+      )}
+    </div>
+  );
+}
