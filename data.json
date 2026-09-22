@@ -1,0 +1,49 @@
+{
+  "users": [
+    {
+      "id": "1",
+      "email": "dc@habariengineering.com",
+      "password": "$2b$10$DyoD.Ug38tjmzFP7rj.pbuuDFTdw2jz8GBNInfxak5gFSJYLVYUpC",
+      "role": "admin",
+      "displayName": "Admin User"
+    }
+  ],
+  "employees": [],
+  "locations": [],
+  "categories": [
+    {
+      "id": "1",
+      "name": "Industrial Cities"
+    },
+    {
+      "id": "2",
+      "name": "Airports"
+    },
+    {
+      "id": "3",
+      "name": "Ports"
+    }
+  ],
+  "passRequests": [],
+  "passes": [],
+  "accessCodes": [],
+  "auditLogs": [
+    {
+      "id": "j6ovnwrus",
+      "userId": "System",
+      "userEmail": "System",
+      "userName": "System",
+      "action": "LOGIN",
+      "entityType": "auth",
+      "entityId": "1",
+      "details": "User dc@habariengineering.com logged in",
+      "timestamp": "2026-03-29T10:41:20.099Z"
+    }
+  ],
+  "companySettings": {
+    "name": "AccessOne",
+    "address": "West Bay, Doha, Qatar",
+    "contactEmail": "info@example.com",
+    "primaryColor": "#800020"
+  }
+}
