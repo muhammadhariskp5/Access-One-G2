@@ -31,18 +31,27 @@ async function startServer() {
     debugLog('Loading heavy libraries...');
     const bcrypt = (await import("bcryptjs")).default;
     const oracledb = (await import("oracledb")).default;
-    const { initializeDatabase, getConnection } = await import("./src/db.ts");
+    const { initializeDatabase, getConnection, getDbEngine } = await import("./src/db.ts");
     debugLog('Heavy libraries loaded');
 
     const safeFilename = typeof import.meta !== "undefined" && import.meta.url ? fileURLToPath(import.meta.url) : (typeof __filename !== "undefined" ? __filename : "");
     const safeDirname = typeof __dirname !== "undefined" ? __dirname : (safeFilename ? path.dirname(safeFilename) : process.cwd());
 
     // --- Audit Logging Helper ---
-    async function logAction(req: express.Request, action: string, entityType: string, entityId: string, details: string) {
-      const userId = req.headers['x-user-id'] as string || 'system';
-      const userEmail = req.headers['x-user-email'] as string || 'system@example.com';
-      const userName = req.headers['x-user-name'] as string || 'System';
-      const orgId = (req.headers['x-user-org-id'] as string) || null;
+    async function logAction(
+      req: express.Request, 
+      action: string, 
+      entityType: string, 
+      entityId: string, 
+      details: string,
+      customActor?: { userId?: string; userEmail?: string; userName?: string; organizationId?: string | null }
+    ) {
+      const userId = customActor?.userId || (req.headers['x-user-id'] as string) || 'system';
+      const userEmail = customActor?.userEmail || (req.headers['x-user-email'] as string) || 'system@example.com';
+      const userName = customActor?.userName || (req.headers['x-user-name'] as string) || 'System';
+      const orgId = customActor?.organizationId !== undefined 
+        ? customActor.organizationId 
+        : ((req.headers['x-user-org-id'] as string) || null);
 
       const log = {
         id: Math.random().toString(36).substr(2, 9),
@@ -104,6 +113,7 @@ async function createNotification(connection: any, params: { userId: string; org
       email: string;
       displayName: string;
       role: string;
+      organizationId?: string | null;
       department?: string;
       jobTitle?: string;
       lastActive: number;
@@ -604,7 +614,7 @@ function verifySessionToken(token) {
       let connection;
       try {
         connection = await getConnection();
-        res.json({ status: "ok", dbConnected: true });
+        res.json({ status: "ok", dbConnected: true, engine: getDbEngine() });
       } catch (err: any) {
         console.error('Health check DB error:', err);
         let error = "Database connection failed";
@@ -959,7 +969,12 @@ function verifySessionToken(token) {
       );
       await connection.commit();
       
-      logAction(req, 'REGISTER', 'auth', newUser.id, `User ${newUser.email} registered as ${newUser.role}`);
+      logAction(req, 'REGISTER', 'auth', newUser.id, `User ${newUser.email} registered as ${newUser.role}`, {
+        userId: newUser.id,
+        userEmail: newUser.email,
+        userName: newUser.displayName,
+        organizationId: newUser.organizationId || null
+      });
       const { password: _, ...userWithoutPassword } = newUser;
       res.json({ ...userWithoutPassword, token: signSessionToken({ id: newUser.id, email: newUser.email, role: newUser.role, organizationId: newUser.organizationId }) });
     } catch (err: any) {
@@ -998,7 +1013,12 @@ function verifySessionToken(token) {
         return res.status(403).json({ error: "Account pending approval. Please contact an administrator." });
       }
       
-      logAction(req, 'LOGIN', 'auth', user.ID || user.id, `User ${user.EMAIL || user.email} logged in`);
+      logAction(req, 'LOGIN', 'auth', user.ID || user.id, `User ${user.EMAIL || user.email} logged in`, {
+        userId: user.ID || user.id,
+        userEmail: user.EMAIL || user.email,
+        userName: user.DISPLAYNAME || user.displayName || user.EMAIL || user.email,
+        organizationId: user.ORGANIZATIONID || user.organizationId || null
+      });
       
       // Update lastLogin timestamp in database
       const nowIso = new Date().toISOString();
@@ -1208,7 +1228,12 @@ app.post("/api/auth/reset-password", async (req, res) => {
     );
     await connection.commit();
 
-    logAction(req, 'RESET_PASSWORD', 'auth', user.ID || user.id, `Password reset for ${trimmedEmail}`);
+    logAction(req, 'RESET_PASSWORD', 'auth', user.ID || user.id, `Password reset for ${trimmedEmail}`, {
+      userId: user.ID || user.id,
+      userEmail: user.EMAIL || user.email,
+      userName: user.DISPLAYNAME || user.displayName || user.EMAIL || user.email,
+      organizationId: user.ORGANIZATIONID || user.organizationId || null
+    });
     res.json({ message: "Password reset successfully" });
   } catch (err: any) {
     console.error('Reset Password Error:', err);
@@ -4426,9 +4451,14 @@ app.post("/api/auth/reset-password", async (req, res) => {
       const binds: any = {};
 
       if (orgId && !isPowerAdmin) {
-        sql += ` AND (organizationId = :orgId OR organizationId IS NULL)`;
+        // Standard org admin: strictly their organization's logs, excluding power admin and global system actions
+        sql += ` AND organizationId = :orgId AND (userEmail IS NULL OR LOWER(userEmail) != 'm.techsandgadgets@gmail.com') AND userId != 'system'`;
         binds.orgId = orgId;
+      } else if (!isPowerAdmin) {
+        // Standard user with no org assigned cannot see cross-tenant or power admin logs
+        sql += ` AND organizationId IS NULL AND (userEmail IS NULL OR LOWER(userEmail) != 'm.techsandgadgets@gmail.com') AND userId != 'system'`;
       } else if (req.query.organizationId) {
+        // Power admin filtering by specific organization
         sql += ` AND organizationId = :orgId`;
         binds.orgId = req.query.organizationId;
       }
@@ -4469,15 +4499,17 @@ app.post("/api/auth/reset-password", async (req, res) => {
       return res.json({ ok: false, error: 'Anonymous or system user' });
     }
 
-    const { email, displayName, role, department, jobTitle, currentPage } = req.body || {};
+    const { email, displayName, role, organizationId, department, jobTitle, currentPage } = req.body || {};
     const now = Date.now();
     const existing = activePresences.get(userId);
+    const orgId = organizationId !== undefined ? organizationId : (existing?.organizationId || (req.headers['x-user-org-id'] as string) || null);
 
     activePresences.set(userId, {
       userId,
       email: email || existing?.email || (req.headers['x-user-email'] as string) || '',
       displayName: displayName || existing?.displayName || (req.headers['x-user-name'] as string) || email || 'User',
       role: role || (req.headers['x-user-role'] as string) || existing?.role || 'viewer',
+      organizationId: orgId,
       department: department || existing?.department || '',
       jobTitle: jobTitle || existing?.jobTitle || '',
       lastActive: now,
@@ -4499,10 +4531,39 @@ app.post("/api/auth/reset-password", async (req, res) => {
     res.json({ ok: true });
   });
 
-  app.get("/api/presence/online-users", authorize([]), (req, res) => {
+  app.get("/api/presence/online-users", authorize([]), async (req, res) => {
     cleanStalePresences();
+    let tenantOrgId: string | null = null;
+    let isPowerAdmin = false;
+    let connection;
+    try {
+      connection = await getConnection();
+      const tenantInfo = await getTenantOrgId(req, connection);
+      tenantOrgId = tenantInfo.orgId;
+      isPowerAdmin = tenantInfo.isPowerAdmin;
+    } catch (e) {
+      // fallback to header if db connection fails
+      tenantOrgId = (req.headers['x-user-org-id'] as string) || null;
+      isPowerAdmin = (req.headers['x-user-role'] as string) === 'power_admin';
+    } finally {
+      if (connection) await connection.close();
+    }
+
     const now = Date.now();
-    const list = Array.from(activePresences.values()).map(p => {
+    let presences = Array.from(activePresences.values());
+
+    // If not power_admin, restrict to users in the same organization and exclude power_admin users
+    if (!isPowerAdmin) {
+      presences = presences.filter(p => {
+        if (p.role === 'power_admin' || p.email?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+        if (tenantOrgId) {
+          return p.organizationId === tenantOrgId;
+        }
+        return true;
+      });
+    }
+
+    const list = presences.map(p => {
       const inactiveSeconds = Math.floor((now - p.lastActive) / 1000);
       const status = inactiveSeconds < 90 ? 'online' : 'idle';
       return {
@@ -4585,13 +4646,26 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
     let connection;
     try {
       connection = await getConnection();
+      const { orgId, isPowerAdmin } = await getTenantOrgId(req, connection);
       
-      // 1. Fetch all registered organization users (excluding global vendor platform admin)
+      // 1. Fetch registered organization users (strictly scoped to tenant if not power admin)
       let users: any[] = [];
       try {
+        let usersSql = `SELECT id, email, role, displayName, photoURL, status, phone, jobTitle, department, division, project, organizationId, createdAt, lastLogin, preferences 
+                        FROM users 
+                        WHERE role != 'power_admin' AND LOWER(email) != 'm.techsandgadgets@gmail.com'`;
+        const userBinds: any = {};
+        if (orgId && !isPowerAdmin) {
+          usersSql += ` AND organizationId = :orgId`;
+          userBinds.orgId = orgId;
+        } else if (!isPowerAdmin) {
+          usersSql += ` AND organizationId IS NULL`;
+        }
+        usersSql += ` ORDER BY displayName ASC`;
+
         const usersResult = await connection.execute(
-          `SELECT id, email, role, displayName, photoURL, status, phone, jobTitle, department, division, project, createdAt, lastLogin, preferences FROM users WHERE role != 'power_admin' AND LOWER(email) != 'm.techsandgadgets@gmail.com' ORDER BY displayName ASC`,
-          [],
+          usersSql,
+          userBinds,
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
         users = (usersResult.rows || []).map(toCamelCase);
@@ -4602,9 +4676,17 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
       // 2. Aggregate pass application counts by requester
       const appCountsMap: Record<string, number> = {};
       try {
+        let passSql = `SELECT requesterId, count(*) as count FROM passRequests WHERE 1=1`;
+        const passBinds: any = {};
+        if (orgId && !isPowerAdmin) {
+          passSql += ` AND organizationId = :orgId`;
+          passBinds.orgId = orgId;
+        }
+        passSql += ` GROUP BY requesterId`;
+
         const appCountsResult = await connection.execute(
-          `SELECT requesterId, count(*) as count FROM passRequests GROUP BY requesterId`,
-          [],
+          passSql,
+          passBinds,
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
         (appCountsResult.rows || []).forEach((row: any) => {
@@ -4621,9 +4703,18 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
       // 3. Aggregate approval decisions from requestHistory
       const approvalCountsMap: Record<string, number> = {};
       try {
+        let histSql = `SELECT userId, count(*) as count FROM requestHistory WHERE (action LIKE '%STATUS_UPDATE%' OR action LIKE '%APPROV%' OR action LIKE '%REJECT%')`;
+        const histBinds: any = {};
+        if (orgId && !isPowerAdmin) {
+          // requestHistory stores requestId pointing to passRequests, which has organizationId
+          histSql += ` AND requestId IN (SELECT id FROM passRequests WHERE organizationId = :orgId)`;
+          histBinds.orgId = orgId;
+        }
+        histSql += ` GROUP BY userId`;
+
         const histResult = await connection.execute(
-          `SELECT userId, count(*) as count FROM requestHistory WHERE action LIKE '%STATUS_UPDATE%' OR action LIKE '%APPROV%' OR action LIKE '%REJECT%' GROUP BY userId`,
-          [],
+          histSql,
+          histBinds,
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
         (histResult.rows || []).forEach((row: any) => {
@@ -4637,12 +4728,22 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
         console.warn("User reports: requestHistory count aggregation warning:", hErr);
       }
 
-      // 4. Aggregate total audit actions logged per user
+      // 4. Aggregate total audit actions logged per user (scoped to organization)
       const auditCountsMap: Record<string, { count: number; lastActionTime: string }> = {};
       try {
+        let auditSql = `SELECT userId, userEmail, count(*) as count, max("TIMESTAMP") as lastActionTime 
+                        FROM auditLogs 
+                        WHERE 1=1`;
+        const auditBinds: any = {};
+        if (orgId && !isPowerAdmin) {
+          auditSql += ` AND organizationId = :orgId AND (userEmail IS NULL OR LOWER(userEmail) != 'm.techsandgadgets@gmail.com') AND userId != 'system'`;
+          auditBinds.orgId = orgId;
+        }
+        auditSql += ` GROUP BY userId, userEmail`;
+
         const auditCountResult = await connection.execute(
-          `SELECT userId, userEmail, count(*) as count, max("TIMESTAMP") as lastActionTime FROM auditLogs GROUP BY userId, userEmail`,
-          [],
+          auditSql,
+          auditBinds,
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
         (auditCountResult.rows || []).forEach((row: any) => {
@@ -4663,29 +4764,42 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
         console.warn("User reports: auditLogs count aggregation warning:", audErr);
       }
 
-      // 5. Recent authentication / security events
+      // 5. Recent authentication / security events (strictly tenant scoped)
       let recentAuthEvents: any[] = [];
       try {
+        let eventsSql = `SELECT id, userId, userEmail, userName, action, entityType, entityId, details, "TIMESTAMP" as timestamp 
+                         FROM auditLogs 
+                         WHERE (entityType IN ('auth', 'user') OR action IN ('LOGIN', 'LOGOUT', 'RESET_PASSWORD', 'CREATE', 'UPDATE'))`;
+        const eventBinds: any = {};
+        if (orgId && !isPowerAdmin) {
+          eventsSql += ` AND organizationId = :orgId AND (userEmail IS NULL OR LOWER(userEmail) != 'm.techsandgadgets@gmail.com') AND userId != 'system'`;
+          eventBinds.orgId = orgId;
+        }
+        eventsSql += ` ORDER BY "TIMESTAMP" DESC FETCH FIRST 30 ROWS ONLY`;
+
         const authEventsResult = await connection.execute(
-          `SELECT id, userId, userEmail, userName, action, entityType, entityId, details, "TIMESTAMP" as timestamp 
-           FROM auditLogs 
-           WHERE entityType IN ('auth', 'user') OR action IN ('LOGIN', 'LOGOUT', 'RESET_PASSWORD', 'CREATE', 'UPDATE')
-           ORDER BY "TIMESTAMP" DESC 
-           FETCH FIRST 30 ROWS ONLY`,
-          [],
+          eventsSql,
+          eventBinds,
           { outFormat: oracledb.OUT_FORMAT_OBJECT }
         );
         recentAuthEvents = (authEventsResult.rows || []).map(toCamelCase);
       } catch (evErr) {
         try {
           // Fallback query if FETCH FIRST is unsupported in older Oracle versions
-          const fallbackEvents = await connection.execute(
-            `SELECT * FROM (
+          let fallbackSql = `SELECT * FROM (
                SELECT id, userId, userEmail, userName, action, entityType, entityId, details, "TIMESTAMP" as timestamp 
                FROM auditLogs 
-               ORDER BY "TIMESTAMP" DESC
-             ) WHERE ROWNUM <= 30`,
-            [],
+               WHERE (entityType IN ('auth', 'user') OR action IN ('LOGIN', 'LOGOUT', 'RESET_PASSWORD', 'CREATE', 'UPDATE'))`;
+          const fbBinds: any = {};
+          if (orgId && !isPowerAdmin) {
+            fallbackSql += ` AND organizationId = :orgId AND (userEmail IS NULL OR LOWER(userEmail) != 'm.techsandgadgets@gmail.com') AND userId != 'system'`;
+            fbBinds.orgId = orgId;
+          }
+          fallbackSql += ` ORDER BY "TIMESTAMP" DESC) WHERE ROWNUM <= 30`;
+
+          const fallbackEvents = await connection.execute(
+            fallbackSql,
+            fbBinds,
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
           recentAuthEvents = (fallbackEvents.rows || []).map(toCamelCase);
@@ -4712,7 +4826,19 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
       });
 
       const now = Date.now();
-      const onlineList = Array.from(activePresences.values()).map(p => {
+      let presences = Array.from(activePresences.values());
+      // Tenant filtering for online presence
+      if (!isPowerAdmin) {
+        presences = presences.filter(p => {
+          if (p.role === 'power_admin' || p.email?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+          if (orgId) {
+            return p.organizationId === orgId;
+          }
+          return true;
+        });
+      }
+
+      const onlineList = presences.map(p => {
         const inactiveSeconds = Math.max(0, Math.floor((now - (p.lastActive || now)) / 1000));
         return {
           ...p,

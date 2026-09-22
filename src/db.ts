@@ -203,7 +203,14 @@ export async function getSqliteConnection() {
 const defaultWalletPath = path.join(process.cwd(), 'wallet');
 let resolvedWalletPath = defaultWalletPath;
 
-if (process.env.TNS_ADMIN) {
+// Detect wallet directory: prioritize local ./wallet if it contains wallet files, otherwise check TNS_ADMIN
+const localHasWallet = fs.existsSync(path.join(defaultWalletPath, 'cwallet.sso')) ||
+                       fs.existsSync(path.join(defaultWalletPath, 'ewallet.pem')) ||
+                       fs.existsSync(path.join(defaultWalletPath, 'tnsnames.ora'));
+
+if (localHasWallet) {
+  resolvedWalletPath = defaultWalletPath;
+} else if (process.env.TNS_ADMIN) {
   const customTns = process.env.TNS_ADMIN.trim().replace(/^[\"']+|[\"']+$/g, '');
   const candidate = customTns.endsWith('.sso') || customTns.endsWith('.ora') ? path.dirname(customTns) : customTns;
   if (fs.existsSync(candidate)) {
@@ -220,10 +227,13 @@ oracledb.fetchTypeHandler = function(columnMetadata) {
   }
 };
 
-// Full TNS description from tnsnames.ora to ensure Thin mode has all context
-const defaultConnectString = `(description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.ap-hyderabad-1.oraclecloud.com))(connect_data=(service_name=g8ce66be06fb613_accessonedev_low.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))`;
-const rawConnectString = process.env.ORACLE_CONNECTION_STRING || defaultConnectString;
-const cleanedConnectString = rawConnectString.trim().replace(/^[\"']+|[\"']+$/g, '');
+// Use alias from tnsnames.ora or full connection string
+const rawConnectString = process.env.ORACLE_CONNECTION_STRING || 'accessonedev_low';
+let cleanedConnectString = rawConnectString.trim().replace(/^[\"']+|[\"']+$/g, '');
+// If connection string contains the full description with accessonedev_low, use accessonedev_low alias from tnsnames.ora
+if (cleanedConnectString.includes('accessonedev_low')) {
+  cleanedConnectString = 'accessonedev_low';
+}
 
 const dbConfig: oracledb.PoolAttributes = {
   connectString: cleanedConnectString,
@@ -232,7 +242,7 @@ const dbConfig: oracledb.PoolAttributes = {
   walletLocation: resolvedWalletPath,
   walletPassword: process.env.ORACLE_WALLET_PASSWORD || 'P@55wo6d',
   poolMin: 2,
-  poolMax: 20,
+  poolMax: 10,
   poolIncrement: 1,
   poolTimeout: 60,
   queueTimeout: 60000,
@@ -277,12 +287,12 @@ export async function getConnection() {
                          fs.existsSync(path.join(resolvedWalletPath, 'ewallet.pem')) ||
                          fs.existsSync(path.join(resolvedWalletPath, 'tnsnames.ora'));
 
-  // Try Oracle if wallet files exist and credentials configured
-  if (hasWalletFiles && (process.env.ORACLE_PASSWORD || process.env.ORACLE_USER)) {
+  // If wallet files are provided, connect directly to Oracle Autonomous Database
+  if (hasWalletFiles) {
     try {
       if (!pool) {
         pool = await oracledb.createPool(dbConfig);
-        console.log('[DB] Oracle connection pool created successfully.');
+        console.log('[DB] Oracle Autonomous Database connection pool created successfully.');
       }
       const conn = await pool.getConnection();
       activeEngine = 'oracle';
@@ -299,11 +309,12 @@ export async function getConnection() {
       };
       return conn;
     } catch (err: any) {
-      console.warn('[DB] Oracle connection failed, falling back to local persistent SQLite:', err.message);
+      console.error('[DB] Failed connecting to Oracle Autonomous Database:', err);
+      throw err;
     }
   }
 
-  // Use persistent SQLite fallback
+  // Only fallback to SQLite if NO wallet files exist at all
   activeEngine = 'sqlite';
   return await getSqliteConnection();
 }

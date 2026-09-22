@@ -411,6 +411,7 @@ export interface UserPresence {
   email: string;
   displayName: string;
   role: UserRole;
+  organizationId?: string | null;
   department?: string;
   jobTitle?: string;
   lastActive: number;

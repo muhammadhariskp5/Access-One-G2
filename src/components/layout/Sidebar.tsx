@@ -284,22 +284,8 @@ export function Sidebar({ user, company, handleLogout }: SidebarProps) {
 
       </div>
 
-      {/* Footer / User Profile & Logout */}
+      {/* Footer / Sign Out Only */}
       <div className="p-2 border-t border-slate-100 bg-slate-50/50">
-        <div className="px-2 py-1.5 mb-1 flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-extrabold text-white shrink-0 bg-[#800020]">
-            {user.displayName ? user.displayName.charAt(0).toUpperCase() : 'U'}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-bold text-slate-800 truncate leading-tight">
-              {user.displayName || user.email}
-            </p>
-            <p className="text-[9px] font-semibold text-slate-400 truncate capitalize leading-tight mt-0.5">
-              {powerAdmin ? '⚡ Global Power Admin' : (user.role === 'admin' ? 'Super Admin' : user.role)}
-            </p>
-          </div>
-        </div>
-
         <button 
           onClick={handleLogout}
           className="w-full flex items-center gap-2 text-slate-500 hover:text-[#800020] hover:bg-rose-50/60 rounded-md transition-colors font-semibold text-[11px] px-2.5 py-1.5 cursor-pointer"

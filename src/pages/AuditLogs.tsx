@@ -114,18 +114,35 @@ export function AuditLogs({
 
   // Compute stats
   const stats = useMemo(() => {
-    const total = logs.length;
-    const distinctUsers = new Set(logs.map(l => l.userEmail || l.userId)).size;
-    const deletes = logs.filter(l => l.action?.toUpperCase() === 'DELETE').length;
-    const creates = logs.filter(l => l.action?.toUpperCase() === 'CREATE').length;
+    const isPowerAdmin = currentUser?.role === 'power_admin';
+    const scopedLogs = logs.filter(log => {
+      if (!isPowerAdmin) {
+        if (log.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+        if (log.userId === 'system' || (log.userName?.toLowerCase() === 'system' && !log.organizationId)) return false;
+        if (currentUser?.organizationId && log.organizationId && log.organizationId !== currentUser.organizationId) return false;
+      }
+      return true;
+    });
+    const total = scopedLogs.length;
+    const distinctUsers = new Set(scopedLogs.map(l => l.userEmail || l.userId)).size;
+    const deletes = scopedLogs.filter(l => l.action?.toUpperCase() === 'DELETE').length;
+    const creates = scopedLogs.filter(l => l.action?.toUpperCase() === 'CREATE').length;
     return { total, distinctUsers, deletes, creates };
-  }, [logs]);
+  }, [logs, currentUser]);
 
   // Filter logs
   const filteredLogs = useMemo(() => {
     const searchCombined = (globalSearch || '').toLowerCase().trim();
+    const isPowerAdmin = currentUser?.role === 'power_admin';
     
     return logs.filter(log => {
+      // Non-power admin must never see power admin or system action logs
+      if (!isPowerAdmin) {
+        if (log.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+        if (log.userId === 'system' || (log.userName?.toLowerCase() === 'system' && !log.organizationId)) return false;
+        if (currentUser?.organizationId && log.organizationId && log.organizationId !== currentUser.organizationId) return false;
+      }
+
       const matchesSearch = 
         !searchCombined ||
         log.userName?.toLowerCase().includes(searchCombined) ||
@@ -150,7 +167,7 @@ export function AuditLogs({
 
       return matchesSearch && matchesUser && matchesAction && matchesEntity;
     });
-  }, [logs, globalSearch, selectedUserFilter, selectedActionFilter, selectedEntityFilter]);
+  }, [logs, globalSearch, selectedUserFilter, selectedActionFilter, selectedEntityFilter, currentUser]);
 
   // Manual refresh handler
   const handleManualRefresh = async (notify: boolean = true) => {

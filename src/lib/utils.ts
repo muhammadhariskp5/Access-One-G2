@@ -181,6 +181,9 @@ export const apiFetch = async (url: string, options: any = {}) => {
       return res;
     } catch (err: any) {
       lastErr = err;
+      if (err?.name === 'AbortError') {
+        throw err;
+      }
       const isNetworkError = err?.name === 'TypeError' && (err?.message?.includes('fetch') || err?.message?.includes('network') || err?.message?.includes('Failed to fetch'));
       
       // Retry transient network drops or proxy reconnections

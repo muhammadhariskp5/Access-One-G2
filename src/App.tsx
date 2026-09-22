@@ -219,39 +219,50 @@ export default function App() {
   // --- Data Fetching ---
   const hadDataErrorRef = useRef(false);
   const fetchSeqRef = useRef(0);
-  const safeFetch = async (url: string, fallback: any): Promise<{ value: any; ok: boolean }> => {
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+
+  const safeFetch = async (url: string, fallback: any, signal?: AbortSignal): Promise<{ value: any; ok: boolean }> => {
     try {
-      const r = await apiFetch(url);
+      const r = await apiFetch(url, signal ? { signal } : {});
       if (r.ok) return { value: await r.json(), ok: true };
       return { value: fallback, ok: false };
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.name === 'AbortError') throw e;
       return { value: fallback, ok: false };
     }
   };
 
   const fetchData = async () => {
     if (!user) return;
+    
+    // Abort any ongoing in-flight HTTP requests from previous fetches
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+    }
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
+
     const mySeq = ++fetchSeqRef.current;
     setIsFetching(true);
     try {
       const results = await Promise.all([
-        safeFetch('/api/employees', []),
-        safeFetch('/api/passes', []),
-        safeFetch('/api/passApplications', []),
-        safeFetch('/api/locations', []),
-        safeFetch('/api/categories', []),
-        safeFetch('/api/accessCodes', []),
-        safeFetch('/api/settings/company', null),
-        safeFetch('/api/users', []),
-        safeFetch('/api/auditLogs', []),
-        safeFetch('/api/divisions', []),
-        safeFetch('/api/projects', []),
-        safeFetch('/api/departments', [])
+        safeFetch('/api/employees', [], abortController.signal),
+        safeFetch('/api/passes', [], abortController.signal),
+        safeFetch('/api/passApplications', [], abortController.signal),
+        safeFetch('/api/locations', [], abortController.signal),
+        safeFetch('/api/categories', [], abortController.signal),
+        safeFetch('/api/accessCodes', [], abortController.signal),
+        safeFetch('/api/settings/company', null, abortController.signal),
+        safeFetch('/api/users', [], abortController.signal),
+        safeFetch('/api/auditLogs', [], abortController.signal),
+        safeFetch('/api/divisions', [], abortController.signal),
+        safeFetch('/api/projects', [], abortController.signal),
+        safeFetch('/api/departments', [], abortController.signal)
       ]);
       const [emps, pss, reqs, locs, cats, grps, comp, usrs, logs, divs, projs, depts] = results.map(r => r.value);
       const hadError = results.some(r => !r.ok);
 
-      if (mySeq !== fetchSeqRef.current) return; // a newer fetch has already started/finished; discard this stale result
+      if (mySeq !== fetchSeqRef.current || abortController.signal.aborted) return; // a newer fetch has started or this was aborted
 
       setEmployees(Array.isArray(emps) ? emps : []);
       setPasses(Array.isArray(pss) ? pss : []);
@@ -274,15 +285,21 @@ export default function App() {
       } else {
         hadDataErrorRef.current = false;
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        // Fetch was intentionally aborted; do not show error or update UI
+        return;
+      }
       console.error("Failed to fetch data:", err);
       if (!hadDataErrorRef.current) {
         showToast('Failed to load data. Please check your connection.', 'error');
       }
       hadDataErrorRef.current = true;
     } finally {
-      setIsLoading(false);
-      setIsFetching(false);
+      if (mySeq === fetchSeqRef.current) {
+        setIsLoading(false);
+        setIsFetching(false);
+      }
     }
   };
 
@@ -296,13 +313,15 @@ export default function App() {
         setAuditLogs(Array.isArray(logs) ? logs : []);
         return logs;
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
       console.error("Failed to fetch audit logs:", err);
     }
   };
 
   useEffect(() => {
     if (user) {
+      setIsLoading(true);
       fetchData();
       
       // Smart background polling: only poll if tab is visible, at a conservative 30s interval
@@ -326,9 +345,10 @@ export default function App() {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       };
     } else {
+      clearUserDataState();
       setIsLoading(false);
     }
-  }, [user]);
+  }, [user?.id]);
 
   // Presence Tracking & Heartbeat
   useEffect(() => {
@@ -344,6 +364,7 @@ export default function App() {
             displayName: user.displayName || user.name || user.email,
             userName: user.userName || user.displayName || user.name || user.email,
             role: user.role,
+            organizationId: user.organizationId || null,
             department: user.department,
             jobTitle: user.jobTitle,
             currentPage: location.pathname
@@ -443,6 +464,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [navigate, user]);
 
+  const clearUserDataState = () => {
+    // Invalidate and cancel any ongoing asynchronous network fetches
+    fetchSeqRef.current++;
+    if (activeAbortControllerRef.current) {
+      activeAbortControllerRef.current.abort();
+      activeAbortControllerRef.current = null;
+    }
+    setEmployees([]);
+    setPasses([]);
+    setApplications([]);
+    setLocations([]);
+    setCategories([]);
+    setAccessCodes([]);
+    setCompany(null);
+    setAllUsers([]);
+    setAuditLogs([]);
+    setDivisions([]);
+    setProjects([]);
+    setDepartments([]);
+    setGlobalSearch('');
+  };
+
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -466,6 +509,9 @@ export default function App() {
         return;
       }
       
+      // Wipe stale data from previous sessions before mounting new user session
+      clearUserDataState();
+      setIsLoading(true);
       setUser(data);
       localStorage.setItem('user', JSON.stringify(data));
       navigate('/');
@@ -481,8 +527,15 @@ export default function App() {
         body: JSON.stringify({ userId: user.id })
       }).catch(() => {});
     }
+    clearUserDataState();
     setUser(null);
     localStorage.removeItem('user');
+    try {
+      sessionStorage.clear();
+      delete (window as any).__accessOneSessionExpiredRedirect;
+    } catch (e) {
+      // Ignore if sessionStorage is restricted in iframe
+    }
     navigate('/');
   };
 
@@ -617,7 +670,7 @@ export default function App() {
   // Dedicated SaaS Master Control Portal (Completely standalone page for Power Admin / Vendor Root)
   if (isPowerAdmin(user)) {
     return (
-      <div className="min-h-screen bg-[#F8F9FA] text-slate-900 flex flex-col font-sans">
+      <div key={`power-admin-${user.id}`} className="min-h-screen bg-[#F8F9FA] text-slate-900 flex flex-col font-sans">
         <MaintenanceBanner company={company} />
         <SaaSAdminPortal
           user={user}
@@ -649,7 +702,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F8F9FA] flex flex-col">
+    <div key={`tenant-user-${user.id}-${user.organizationId || 'global'}`} className="min-h-screen bg-[#F8F9FA] flex flex-col">
       <MaintenanceBanner company={company} />
       <div className="flex-1 flex">
         {/* Connectivity Alert */}

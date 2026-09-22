@@ -1308,130 +1308,6 @@ export function ApplicationDetail({
             )
           ) : (
             <>
-              {/* Stage 1 Action: Change to Stage 2 (Under Processing) */}
-              {currentUser?.role === 'admin' && isAppStage1 && (
-                <>
-                  <button 
-                    onClick={async () => {
-                      await executeAppStatusUpdate('processing', 'Change from Stage 1 (Under Review) to Stage 2 (Under Processing)');
-                    }}
-                    disabled={isSubmittingAction}
-                    className="h-8 px-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                    title="Change workflow stage to Stage 2: Under Processing"
-                  >
-                    <ArrowRightCircle size={13} className="shrink-0" />
-                    <span>Change to Stage 2 (Under Processing)</span>
-                  </button>
-                  <button 
-                    onClick={async () => {
-                      showConfirm(
-                        "Reject Application",
-                        `Are you sure you want to reject application #${application.authorityAppNumber || application.id}?`,
-                        async () => {
-                          await executeAppStatusUpdate('rejected', 'Rejected at Stage 1: Under Review');
-                        }
-                      );
-                    }}
-                    disabled={isSubmittingAction}
-                    className="h-8 px-2.5 bg-rose-50 hover:bg-rose-600 hover:text-white border border-rose-200 text-rose-700 rounded-lg font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                    title="Reject Application"
-                  >
-                    <Ban size={13} className="shrink-0" />
-                    <span>Reject</span>
-                  </button>
-                </>
-              )}
-
-              {/* Stage 2 Action: Change to Stage 3 (Accepted for Processing) & Issue Passes (Next Process) */}
-              {currentUser?.role === 'admin' && isAppStage2 && (
-                <>
-                  <button 
-                    onClick={async () => {
-                      await executeAppStatusUpdate('accepted', 'Change from Stage 2 (Under Processing) to Stage 3 (Accepted for Processing)');
-                    }}
-                    disabled={isSubmittingAction}
-                    className="h-8 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                    title="Change workflow stage to Stage 3: Accepted for Processing"
-                  >
-                    <ArrowRightCircle size={13} className="shrink-0" />
-                    <span>Change to Stage 3 (Accepted for Processing)</span>
-                  </button>
-                  <button 
-                    onClick={handleOpenIssueAllPasses}
-                    disabled={isSubmittingAction}
-                    className="h-8 px-2.5 bg-[#800020] hover:bg-[#600018] text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                    title="Proceed directly to Pass Issuance (Next Process) in one click without doing it two times"
-                  >
-                    <Plus size={13} className="shrink-0" />
-                    <span>Issue Passes (Next Process)</span>
-                  </button>
-                  <button 
-                    onClick={async () => {
-                      showConfirm(
-                        "Reject Application",
-                        `Are you sure you want to reject application #${application.authorityAppNumber || application.id}?`,
-                        async () => {
-                          await executeAppStatusUpdate('rejected', 'Rejected at Stage 2: Under Processing');
-                        }
-                      );
-                    }}
-                    disabled={isSubmittingAction}
-                    className="h-8 px-2.5 bg-rose-50 hover:bg-rose-600 hover:text-white border border-rose-200 text-rose-700 rounded-lg font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                    title="Reject Application"
-                  >
-                    <Ban size={13} className="shrink-0" />
-                    <span>Reject</span>
-                  </button>
-                </>
-              )}
-
-              {/* Stage 3 Action: Issue All Passes (if passes not yet created for all personnel) */}
-              {currentUser?.role === 'admin' && isAppStage3 && appPasses.length < allPersonnelIds.length && (
-                <button 
-                  onClick={handleOpenIssueAllPasses}
-                  disabled={isSubmittingAction}
-                  className="h-8 px-2.5 bg-[#800020] hover:bg-[#600018] text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                  title="Open batch issuance form for all unissued personnel (Stage 4)"
-                >
-                  <Plus size={13} className="shrink-0" />
-                  <span>Issue All Passes (Stage 4)</span>
-                </button>
-              )}
-
-              {/* Stage 4 Action: Mark All Collected (When passes are issued and collected at counter) */}
-              {currentUser?.role === 'admin' && (isAppStage4 || (appPasses.length > 0 && !stats.allDone)) && (
-                <button 
-                  onClick={handleQuickCollectAllPasses}
-                  disabled={isSubmittingAction}
-                  className="h-8 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                  title="Mark all issued application passes as collected at the security counter (Stage 4: Pass Issuance & Collection)"
-                >
-                  <ClipboardCheck size={13} className="shrink-0" />
-                  <span>Mark All Collected</span>
-                </button>
-              )}
-
-              {/* Re-open Application Action (When Application is Rejected or Cancelled) */}
-              {currentUser?.role === 'admin' && (application.status === 'rejected' || application.status === 'cancelled') && (
-                <button 
-                  onClick={() => {
-                    showConfirm(
-                      "Re-open Application",
-                      `Are you sure you want to re-open application #${application.authorityAppNumber || application.id}? This will reset the application to Stage 1: Under Review.`,
-                      async () => {
-                        await executeAppStatusUpdate('pending', 'Re-opened application: reset to Stage 1: Under Review');
-                      }
-                    );
-                  }}
-                  disabled={isSubmittingAction}
-                  className="h-8 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
-                  title="Re-open this application to Under Review"
-                >
-                  <RefreshCw size={13} className="shrink-0" />
-                  <span>Re-open Application</span>
-                </button>
-              )}
-
               {currentUser?.role !== 'viewer' && (
                 <button 
                   onClick={handleOpenEditApp}
@@ -1515,6 +1391,24 @@ export function ApplicationDetail({
         }}
         onOpenIssuePasses={handleOpenIssueAllPasses}
         onMarkAllCollected={handleQuickCollectAllPasses}
+        onReject={() => {
+          showConfirm(
+            "Reject Application",
+            `Are you sure you want to reject application #${application.authorityAppNumber || application.id}?`,
+            async () => {
+              await executeAppStatusUpdate('rejected', `Rejected at stage: ${computedAppStatus || application.status}`);
+            }
+          );
+        }}
+        onReopen={() => {
+          showConfirm(
+            "Re-open Application",
+            `Are you sure you want to re-open application #${application.authorityAppNumber || application.id}? This will reset the application to Stage 1: Under Review.`,
+            async () => {
+              await executeAppStatusUpdate('pending', 'Re-opened application: reset to Stage 1: Under Review');
+            }
+          );
+        }}
       />
 
       {/* Main Overview Grid - Minimalist Single Card */}

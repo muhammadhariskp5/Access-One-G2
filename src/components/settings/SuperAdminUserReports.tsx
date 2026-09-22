@@ -262,17 +262,23 @@ export function SuperAdminUserReports({
   // Filtered Auth Events
   const filteredAuthEvents = useMemo(() => {
     if (!reportData?.recentAuthEvents) return [];
+    const isPower = currentUser?.role === 'power_admin';
     return reportData.recentAuthEvents.filter(ev => {
+      if (!isPower) {
+        if (ev.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+        if (ev.userId === 'system' || (ev.userName?.toLowerCase() === 'system' && !ev.organizationId)) return false;
+        if (currentUser?.organizationId && ev.organizationId && ev.organizationId !== currentUser.organizationId) return false;
+      }
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch = !q || 
-        ev.userEmail.toLowerCase().includes(q) || 
+        (ev.userEmail && ev.userEmail.toLowerCase().includes(q)) || 
         (ev.userName && ev.userName.toLowerCase().includes(q)) || 
-        ev.action.toLowerCase().includes(q) || 
-        ev.details.toLowerCase().includes(q);
+        (ev.action && ev.action.toLowerCase().includes(q)) || 
+        (ev.details && ev.details.toLowerCase().includes(q));
 
       return matchesSearch;
     });
-  }, [reportData?.recentAuthEvents, searchQuery]);
+  }, [reportData?.recentAuthEvents, searchQuery, currentUser]);
 
   return (
     <div className="space-y-4">
