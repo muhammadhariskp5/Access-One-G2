@@ -820,6 +820,8 @@ export default function App() {
               } />
               <Route path="/matrix" element={
                 <AccessMatrix 
+                  currentUser={user}
+                  showToast={showToast}
                   employees={employees}
                   passes={passes}
                   locations={locations}

@@ -7,12 +7,14 @@ import {
   Calendar, FileText, Trash2, Edit2, Settings2, Upload, AlertCircle,
   MoreVertical, Info, Download, Printer, History, ArrowRight, Table, Ban,
   Activity, Users, Check, LayoutGrid, Tag, Send, ClipboardCheck, PlusCircle,
-  Layers, Eye, Grid, ClipboardList, ArrowUpDown, ArrowUp, ArrowDown, Loader2
+  Layers, Eye, Grid, ClipboardList, ArrowUpDown, ArrowUp, ArrowDown, Loader2, Columns
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BulkImportReview } from '../common/BulkImportReview';
 import { PrintExportModal } from '../common/PrintExportModal';
 import { DateRangeFilter } from '../common/DateRangeFilter';
+import { ColumnCustomizerModal, ColumnDefinition } from '../common/ColumnCustomizerModal';
+import { useUserColumnPreferences } from '../../hooks/useUserColumnPreferences';
 import { PassDetails } from './PassDetails';
 import { 
   Pass, PassApplication, Employee, Location, Category, AccessCode, Project, 
@@ -69,6 +71,50 @@ export function PassApplicationsView({
 }: PassApplicationsViewProps) { 
   const [isActionsOpen, setIsActionsOpen] = useState(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [isColumnModalOpen, setIsColumnModalOpen] = useState(false);
+
+  // Column definitions for Applications Queue (Export & Roster tables)
+  const availableColumns: ColumnDefinition[] = useMemo(() => [
+    { id: 'ref', label: 'Application Ref #', required: true },
+    { id: 'authority', label: 'Authority App #' },
+    { id: 'location', label: 'Location & Site' },
+    { id: 'type', label: 'Application Type' },
+    { id: 'personnel', label: 'Personnel Count' },
+    { id: 'validity', label: 'Pass Validity & Expiry' },
+    { id: 'status', label: 'Workflow Status', required: true }
+  ], []);
+
+  const defaultColumnIds = useMemo(() => [
+    'ref', 'authority', 'location', 'type', 'personnel', 'validity', 'status'
+  ], []);
+
+  const {
+    columns: visibleColumns,
+    saveColumns,
+    isSaving: isSavingColumns
+  } = useUserColumnPreferences(currentUser, 'applicationColumns', defaultColumnIds);
+
+  const availablePersonnelColumns: ColumnDefinition[] = useMemo(() => [
+    { id: 'name', label: 'Personnel Name', required: true },
+    { id: 'qid', label: 'ID / QID' },
+    { id: 'job', label: 'Job Title & Department' },
+    { id: 'status', label: 'Workflow Status', required: true },
+    { id: 'validity', label: 'Pass Validity & Expiry' },
+    { id: 'passNo', label: 'Pass #' },
+    { id: 'workspace', label: 'Workspace Action' }
+  ], []);
+
+  const defaultPersonnelColumnIds = useMemo(() => [
+    'name', 'qid', 'job', 'status', 'validity', 'passNo', 'workspace'
+  ], []);
+
+  const {
+    columns: visiblePersonnelColumns,
+    saveColumns: savePersonnelColumns
+  } = useUserColumnPreferences(currentUser, 'personnelColumns', defaultPersonnelColumnIds);
+
+  const [isPersonnelColumnModalOpen, setIsPersonnelColumnModalOpen] = useState(false);
+
   const [isImporting, setIsImporting] = useState(false);
   const [importStep, setImportStep] = useState<'upload' | 'mapping' | 'review'>('upload');
   const [rawHeaders, setRawHeaders] = useState<string[]>([]);
@@ -167,35 +213,60 @@ export function PassApplicationsView({
   const handleExportExcel = () => {
     const workbook = XLSX.utils.book_new();
 
-    const headers = [
-      "S/N",
-      "Application Ref",
-      "Authority App No",
-      "Location",
-      "Type",
-      "Total Personnel",
-      "Start Date",
-      "Applicant Pass Expiry",
-      "Status",
-      "Submitted At"
-    ];
-
-    const rows = displayedApps.map((app, index) => {
-      const loc = locations.find(l => l.id === app.locationId);
-      return [
-        (index + 1).toString(),
-        `#${app.id.toUpperCase()}`,
-        app.authorityAppNumber || '—',
-        loc?.name || '—',
-        app.type === 'main' ? 'Main' : 'Supplementary',
-        (app.employeeIds?.length || 0).toString(),
-        formatDate(app.startDate),
-        formatDate(app.endDate || (() => {
+    const columnMap: Record<string, { label: string; getVal: (app: PassApplication, idx: number) => string; wch: number }> = {
+      ref: {
+        label: "Application Ref",
+        getVal: (app) => `#${app.id.toUpperCase()}`,
+        wch: 18
+      },
+      authority: {
+        label: "Authority App No",
+        getVal: (app) => app.authorityAppNumber || '—',
+        wch: 20
+      },
+      location: {
+        label: "Location",
+        getVal: (app) => {
+          const loc = locations.find(l => l.id === app.locationId);
+          return loc?.name || '—';
+        },
+        wch: 25
+      },
+      type: {
+        label: "Type",
+        getVal: (app) => app.type === 'main' ? 'Main' : 'Supplementary',
+        wch: 14
+      },
+      personnel: {
+        label: "Total Personnel",
+        getVal: (app) => (app.employeeIds?.length || 0).toString(),
+        wch: 16
+      },
+      validity: {
+        label: "Applicant Pass Expiry",
+        getVal: (app) => `${formatDate(app.startDate)} to ${formatDate(app.endDate || (() => {
           const exps = Object.values(app.individualExpiries || {}).filter(Boolean) as string[];
           return exps.length > 0 ? [...exps].sort().reverse()[0] : undefined;
-        })()),
-        app.status.toUpperCase(),
-        formatDate(app.createdAt)
+        })())}`,
+        wch: 25
+      },
+      status: {
+        label: "Status",
+        getVal: (app) => app.status.toUpperCase(),
+        wch: 14
+      }
+    };
+
+    const activeColDefs = visibleColumns
+      .map(colId => columnMap[colId])
+      .filter(Boolean);
+
+    const headers = ["S/N", ...activeColDefs.map(c => c.label)];
+
+    const rows = displayedApps.map((app, index) => {
+      return [
+        (index + 1).toString(),
+        ...activeColDefs.map(c => c.getVal(app, index))
       ];
     });
 
@@ -209,15 +280,7 @@ export function PassApplicationsView({
 
     worksheet['!cols'] = [
       { wch: 6 },
-      { wch: 18 },
-      { wch: 20 },
-      { wch: 25 },
-      { wch: 14 },
-      { wch: 16 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 }
+      ...activeColDefs.map(c => ({ wch: c.wch }))
     ];
 
     XLSX.utils.book_append_sheet(workbook, worksheet, "Applications Queue");
@@ -261,6 +324,14 @@ export function PassApplicationsView({
               onStartDateChange={setStartDateFilter}
               onEndDateChange={setEndDateFilter}
             />
+            <button
+              onClick={() => setIsColumnModalOpen(true)}
+              className="h-9 px-3.5 bg-white text-gray-700 hover:bg-gray-50 rounded-xl border border-gray-200 transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer shadow-2xs"
+              title="Customize and reorder table columns"
+            >
+              <Columns size={14} className="text-[#800020]" />
+              <span>Columns</span>
+            </button>
             <button
               onClick={() => setIsPrintModalOpen(true)}
               className="h-9 px-3.5 bg-white text-gray-700 hover:bg-gray-50 rounded-xl border border-gray-200 transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer shadow-2xs"
@@ -576,6 +647,14 @@ export function PassApplicationsView({
                         <span className="text-[10px] text-gray-400 font-medium">({app.employeeIds.length} Applicants)</span>
                       </div>
                       <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setIsPersonnelColumnModalOpen(true)}
+                          className="px-2.5 py-1.5 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-2xs transition-all cursor-pointer"
+                          title="Customize personnel roster columns"
+                        >
+                          <Columns size={13} className="text-[#800020]" />
+                          <span>Columns</span>
+                        </button>
                         <Link
                           to={`/applications/${app.id}`}
                           className="px-3 py-1.5 bg-[#800020] text-white hover:bg-[#600018] rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-2xs transition-all cursor-pointer"
@@ -592,13 +671,17 @@ export function PassApplicationsView({
                       <table className="w-full text-left text-xs">
                         <thead className="bg-gray-50 border-b border-gray-200 text-[10px] font-bold text-gray-500 uppercase">
                           <tr>
-                            <th className="p-3">Personnel Name</th>
-                            <th className="p-3">ID / QID</th>
-                            <th className="p-3">Job Title & Dept</th>
-                            <th className="p-3">Workflow Status</th>
-                            <th className="p-3">Pass Validity & Expiry</th>
-                            <th className="p-3">Pass #</th>
-                            <th className="p-3 text-right">Workspace</th>
+                            {visiblePersonnelColumns.map(colId => {
+                              const def = availablePersonnelColumns.find(c => c.id === colId);
+                              return (
+                                <th 
+                                  key={colId} 
+                                  className={cn("p-3", colId === 'workspace' && "text-right")}
+                                >
+                                  {def?.label || colId}
+                                </th>
+                              );
+                            })}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium text-gray-700">
@@ -633,58 +716,89 @@ export function PassApplicationsView({
 
                             return (
                               <tr key={empId} className="hover:bg-gray-50/80">
-                                <td className="p-3 font-bold text-[#1E293B]">{emp?.name || 'Unknown Member'}</td>
-                                <td className="p-3">{emp?.employeeId || emp?.qatarId || '-'}</td>
-                                <td className="p-3">
-                                  <div>{emp?.jobTitle || '-'}</div>
-                                  <div className="text-[10px] text-gray-400">{emp?.department || '-'}</div>
-                                </td>
-                                <td className="p-3">
-                                  <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase", stageBadgeClass)}>
-                                    {resolved.label}
-                                  </span>
-                                </td>
-                                <td className="p-3 font-semibold text-gray-800">
-                                  {startFmt !== '-' && endFmt !== '-' ? (
-                                    <div className="flex items-center gap-1 text-xs text-gray-900 font-bold whitespace-nowrap">
-                                      <Calendar size={13} className="text-[#800020] shrink-0" />
-                                      <span>{startFmt} to {endFmt}</span>
-                                    </div>
-                                  ) : endFmt !== '-' ? (
-                                    <div className="flex items-center gap-1 text-xs text-gray-900 font-bold whitespace-nowrap">
-                                      <Calendar size={13} className="text-[#800020] shrink-0" />
-                                      <span>Valid until {endFmt}</span>
-                                    </div>
-                                  ) : (
-                                    <span className="text-xs text-gray-400 italic">Dates pending</span>
-                                  )}
-                                  <div className="text-[10px] text-gray-400 font-normal mt-0.5">
-                                    {indExp ? 'Per-Applicant Date' : empPass?.expiryDate ? 'Issued Pass Date' : 'Application Date'}
-                                  </div>
-                                </td>
-                                <td className="p-3 font-bold">
-                                  {empPass?.passNumber ? (
-                                    <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
-                                      #{empPass.passNumber}
-                                    </span>
-                                  ) : empPass?.id ? (
-                                    <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
-                                      #{empPass.id.toUpperCase()}
-                                    </span>
-                                  ) : (
-                                    <span className="text-gray-400 font-normal italic">Pending Issue</span>
-                                  )}
-                                </td>
-                                <td className="p-3 text-right whitespace-nowrap">
-                                  <Link
-                                    to={`/applications/${app.id}`}
-                                    className="px-2.5 py-1 bg-gray-100 hover:bg-[#800020] hover:text-white rounded-lg text-[11px] font-bold text-gray-700 transition-all inline-flex items-center gap-1"
-                                    title="Open application workspace to manage this applicant"
-                                  >
-                                    <span>Details</span>
-                                    <ArrowRight size={11} />
-                                  </Link>
-                                </td>
+                                {visiblePersonnelColumns.map(colId => {
+                                  if (colId === 'name') {
+                                    return (
+                                      <td key={colId} className="p-3 font-bold text-[#1E293B]">{emp?.name || 'Unknown Member'}</td>
+                                    );
+                                  }
+                                  if (colId === 'qid') {
+                                    return (
+                                      <td key={colId} className="p-3">{emp?.employeeId || emp?.qatarId || '-'}</td>
+                                    );
+                                  }
+                                  if (colId === 'job') {
+                                    return (
+                                      <td key={colId} className="p-3">
+                                        <div>{emp?.jobTitle || '-'}</div>
+                                        <div className="text-[10px] text-gray-400">{emp?.department || '-'}</div>
+                                      </td>
+                                    );
+                                  }
+                                  if (colId === 'status') {
+                                    return (
+                                      <td key={colId} className="p-3">
+                                        <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase", stageBadgeClass)}>
+                                          {resolved.label}
+                                        </span>
+                                      </td>
+                                    );
+                                  }
+                                  if (colId === 'validity') {
+                                    return (
+                                      <td key={colId} className="p-3 font-semibold text-gray-800">
+                                        {startFmt !== '-' && endFmt !== '-' ? (
+                                          <div className="flex items-center gap-1 text-xs text-gray-900 font-bold whitespace-nowrap">
+                                            <Calendar size={13} className="text-[#800020] shrink-0" />
+                                            <span>{startFmt} to {endFmt}</span>
+                                          </div>
+                                        ) : endFmt !== '-' ? (
+                                          <div className="flex items-center gap-1 text-xs text-gray-900 font-bold whitespace-nowrap">
+                                            <Calendar size={13} className="text-[#800020] shrink-0" />
+                                            <span>Valid until {endFmt}</span>
+                                          </div>
+                                        ) : (
+                                          <span className="text-xs text-gray-400 italic">Dates pending</span>
+                                        )}
+                                        <div className="text-[10px] text-gray-400 font-normal mt-0.5">
+                                          {indExp ? 'Per-Applicant Date' : empPass?.expiryDate ? 'Issued Pass Date' : 'Application Date'}
+                                        </div>
+                                      </td>
+                                    );
+                                  }
+                                  if (colId === 'passNo') {
+                                    return (
+                                      <td key={colId} className="p-3 font-bold">
+                                        {empPass?.passNumber ? (
+                                          <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
+                                            #{empPass.passNumber}
+                                          </span>
+                                        ) : empPass?.id ? (
+                                          <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
+                                            #{empPass.id.toUpperCase()}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400 font-normal italic">Pending Issue</span>
+                                        )}
+                                      </td>
+                                    );
+                                  }
+                                  if (colId === 'workspace') {
+                                    return (
+                                      <td key={colId} className="p-3 text-right whitespace-nowrap">
+                                        <Link
+                                          to={`/applications/${app.id}`}
+                                          className="px-2.5 py-1 bg-gray-100 hover:bg-[#800020] hover:text-white rounded-lg text-[11px] font-bold text-gray-700 transition-all inline-flex items-center gap-1"
+                                          title="Open application workspace to manage this applicant"
+                                        >
+                                          <span>Details</span>
+                                          <ArrowRight size={11} />
+                                        </Link>
+                                      </td>
+                                    );
+                                  }
+                                  return null;
+                                })}
                               </tr>
                             );
                           })}
@@ -746,13 +860,22 @@ export function PassApplicationsView({
               <thead>
                 <tr className="bg-[#800020] text-white text-[9px] uppercase tracking-wider font-extrabold">
                   <th className="p-2 text-center rounded-tl-lg w-8 border-r border-rose-900/40">S/N</th>
-                  <th className="p-2">App Ref #</th>
-                  <th className="p-2">Authority App #</th>
-                  <th className="p-2">Location</th>
-                  <th className="p-2">Type</th>
-                  <th className="p-2 text-center">Personnel</th>
-                  <th className="p-2">Applicant Pass Expiry</th>
-                  <th className="p-2 rounded-tr-lg">Status</th>
+                  {visibleColumns.map((colId, cIdx) => {
+                    const isLast = cIdx === visibleColumns.length - 1;
+                    const def = availableColumns.find(c => c.id === colId);
+                    return (
+                      <th 
+                        key={colId} 
+                        className={cn(
+                          "p-2", 
+                          colId === 'personnel' && "text-center",
+                          isLast && "rounded-tr-lg"
+                        )}
+                      >
+                        {def?.label || colId}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
@@ -761,20 +884,53 @@ export function PassApplicationsView({
                   return (
                     <tr key={app.id} className={cn("text-[9px]", idx % 2 === 0 ? "bg-white" : "bg-[#F9FAFB]")}>
                       <td className="p-2 text-center font-bold text-gray-500 border-r border-gray-200">{idx + 1}</td>
-                      <td className="p-2 font-bold text-[#800020]">#{app.id.toUpperCase()}</td>
-                      <td className="p-2 font-mono text-gray-800">{app.authorityAppNumber || '—'}</td>
-                      <td className="p-2 font-semibold text-gray-800">{loc?.name || '—'}</td>
-                      <td className="p-2 capitalize font-medium text-gray-600">{app.type}</td>
-                      <td className="p-2 text-center font-bold text-gray-800">{app.employeeIds?.length || 0}</td>
-                      <td className="p-2 text-gray-600 font-medium">{formatDate(app.startDate)} to {formatDate(app.endDate || (() => {
-                        const exps = Object.values(app.individualExpiries || {}).filter(Boolean) as string[];
-                        return exps.length > 0 ? [...exps].sort().reverse()[0] : undefined;
-                      })())}</td>
-                      <td className="p-2">
-                        <span className="px-2 py-0.5 rounded-full text-[8px] font-extrabold uppercase bg-gray-100 text-gray-800">
-                          {app.status}
-                        </span>
-                      </td>
+                      {visibleColumns.map(colId => {
+                        if (colId === 'ref') {
+                          return (
+                            <td key={colId} className="p-2 font-bold text-[#800020]">#{app.id.toUpperCase()}</td>
+                          );
+                        }
+                        if (colId === 'authority') {
+                          return (
+                            <td key={colId} className="p-2 font-mono text-gray-800">{app.authorityAppNumber || '—'}</td>
+                          );
+                        }
+                        if (colId === 'location') {
+                          return (
+                            <td key={colId} className="p-2 font-semibold text-gray-800">{loc?.name || '—'}</td>
+                          );
+                        }
+                        if (colId === 'type') {
+                          return (
+                            <td key={colId} className="p-2 capitalize font-medium text-gray-600">{app.type}</td>
+                          );
+                        }
+                        if (colId === 'personnel') {
+                          return (
+                            <td key={colId} className="p-2 text-center font-bold text-gray-800">{app.employeeIds?.length || 0}</td>
+                          );
+                        }
+                        if (colId === 'validity') {
+                          return (
+                            <td key={colId} className="p-2 text-gray-600 font-medium">
+                              {formatDate(app.startDate)} to {formatDate(app.endDate || (() => {
+                                const exps = Object.values(app.individualExpiries || {}).filter(Boolean) as string[];
+                                return exps.length > 0 ? [...exps].sort().reverse()[0] : undefined;
+                              })())}
+                            </td>
+                          );
+                        }
+                        if (colId === 'status') {
+                          return (
+                            <td key={colId} className="p-2">
+                              <span className="px-2 py-0.5 rounded-full text-[8px] font-extrabold uppercase bg-gray-100 text-gray-800">
+                                {app.status}
+                              </span>
+                            </td>
+                          );
+                        }
+                        return null;
+                      })}
                     </tr>
                   );
                 })}
@@ -783,6 +939,34 @@ export function PassApplicationsView({
           </div>
         </div>
       </PrintExportModal>
+
+      {/* User Column Customizer Modal */}
+      <ColumnCustomizerModal
+        isOpen={isColumnModalOpen}
+        onClose={() => setIsColumnModalOpen(false)}
+        availableColumns={availableColumns}
+        currentColumnIds={visibleColumns}
+        defaultColumnIds={defaultColumnIds}
+        onSave={async (newCols) => {
+          await saveColumns(newCols);
+          showToast('Table columns configuration saved to your profile', 'success');
+        }}
+        title="Customize Application Columns"
+      />
+
+      {/* Personnel Roster Column Customizer Modal */}
+      <ColumnCustomizerModal
+        isOpen={isPersonnelColumnModalOpen}
+        onClose={() => setIsPersonnelColumnModalOpen(false)}
+        availableColumns={availablePersonnelColumns}
+        currentColumnIds={visiblePersonnelColumns}
+        defaultColumnIds={defaultPersonnelColumnIds}
+        onSave={async (newCols) => {
+          await savePersonnelColumns(newCols);
+          showToast('Personnel columns configuration saved to your profile', 'success');
+        }}
+        title="Customize Personnel Roster Columns"
+      />
     </div>
   );
 }

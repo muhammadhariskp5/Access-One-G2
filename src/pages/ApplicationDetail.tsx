@@ -122,6 +122,109 @@ export function ApplicationDetail({
     onConfirm: () => Promise<void>;
   } | null>(null);
 
+  // User-Customizable Column Widths with LocalStorage persistence per user
+  const defaultColWidths: Record<string, number> = useMemo(() => ({
+    checkbox: 44,
+    name: 260,
+    code: 160,
+    dept: 180,
+    location: 200,
+    access: 190,
+    passNum: 140,
+    validity: 210,
+    status: 150,
+    actions: 240
+  }), []);
+
+  const storageKey = useMemo(() => {
+    const userIdentifier = currentUser?.id || currentUser?.email || 'default_user';
+    return `app_detail_roster_cols_${userIdentifier}`;
+  }, [currentUser?.id, currentUser?.email]);
+
+  const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return { ...defaultColWidths, ...parsed };
+      }
+    } catch {
+      // Fallback
+    }
+    return defaultColWidths;
+  });
+
+  // Re-read if user changes
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        setColWidths({ ...defaultColWidths, ...parsed });
+      } else {
+        setColWidths(defaultColWidths);
+      }
+    } catch {
+      setColWidths(defaultColWidths);
+    }
+  }, [storageKey, defaultColWidths]);
+
+  // Resizing handler
+  const [resizingCol, setResizingCol] = useState<string | null>(null);
+  const resizeStateRef = React.useRef<{ colKey: string; startX: number; startWidth: number } | null>(null);
+
+  const startColResize = useCallback((colKey: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const currentWidth = colWidths[colKey] || defaultColWidths[colKey] || 150;
+    resizeStateRef.current = {
+      colKey,
+      startX: e.clientX,
+      startWidth: currentWidth
+    };
+    setResizingCol(colKey);
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!resizeStateRef.current) return;
+      const delta = moveEvent.clientX - resizeStateRef.current.startX;
+      const newWidth = Math.max(70, Math.min(650, resizeStateRef.current.startWidth + delta));
+      setColWidths(prev => ({
+        ...prev,
+        [resizeStateRef.current!.colKey]: newWidth
+      }));
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      if (resizeStateRef.current) {
+        setColWidths(latest => {
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(latest));
+          } catch {
+            // ignore
+          }
+          return latest;
+        });
+      }
+      resizeStateRef.current = null;
+      setResizingCol(null);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [colWidths, defaultColWidths, storageKey]);
+
+  const resetColWidths = useCallback(() => {
+    setColWidths(defaultColWidths);
+    try {
+      localStorage.removeItem(storageKey);
+      showToast("Column widths reset to defaults", "success");
+    } catch {
+      // ignore
+    }
+  }, [defaultColWidths, storageKey, showToast]);
+
   // Match current application from URL parameter
   const application = useMemo(() => {
     if (!id) return null;
@@ -1572,29 +1675,45 @@ export function ApplicationDetail({
               </div>
             </div>
 
-            {/* Batch Action Trigger */}
-            {selectedEmpIds.length > 0 && currentUser?.role !== 'viewer' && application.status !== 'archived' && (
-              <div className="flex items-center gap-2 bg-rose-50 border border-rose-200/60 px-2.5 py-1 rounded-lg">
-                <span className="text-xs font-semibold text-[#800020]">
-                  {selectedEmpIds.length} Selected
-                </span>
-                <button 
-                  onClick={() => setIsMemberStatusModalOpen(true)}
-                  className="px-2.5 py-1 bg-[#800020] text-white rounded-md text-xs font-medium hover:bg-[#600018] transition-all flex items-center gap-1 cursor-pointer"
-                >
-                  <UserCheck size={13} />
-                  Update Status
-                </button>
-              </div>
-            )}
+            {/* Controls Right Side: Batch Actions & Column Reset */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={resetColWidths}
+                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[11px] font-semibold transition-all flex items-center gap-1 cursor-pointer border border-slate-200"
+                title="Reset columns to default widths for this user"
+              >
+                <RefreshCw size={11} />
+                <span>Reset Columns</span>
+              </button>
+
+              {selectedEmpIds.length > 0 && currentUser?.role !== 'viewer' && application.status !== 'archived' && (
+                <div className="flex items-center gap-2 bg-rose-50 border border-rose-200/60 px-2.5 py-1 rounded-lg">
+                  <span className="text-xs font-semibold text-[#800020]">
+                    {selectedEmpIds.length} Selected
+                  </span>
+                  <button 
+                    onClick={() => setIsMemberStatusModalOpen(true)}
+                    className="px-2.5 py-1 bg-[#800020] text-white rounded-md text-xs font-medium hover:bg-[#600018] transition-all flex items-center gap-1 cursor-pointer"
+                  >
+                    <UserCheck size={13} />
+                    Update Status
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Table of Personnel */}
-          <div className="overflow-x-auto rounded-2xl border border-gray-100">
-            <table className="w-full text-left border-collapse text-xs">
+          {/* Table of Personnel with Resizable Columns */}
+          <div className="overflow-x-auto rounded-2xl border border-gray-100 select-text">
+            <table className="w-full text-left border-collapse text-xs table-fixed">
               <thead>
-                <tr className="bg-gray-50/80 border-b border-gray-200/80 text-[10px] font-bold text-[#9CA3AF] uppercase tracking-wider">
-                  <th className="p-3.5 w-10 text-center">
+                <tr className="bg-gray-50/80 border-b border-gray-200/80 text-[10px] font-bold text-[#9CA3AF] uppercase tracking-wider select-none">
+                  {/* Checkbox Column */}
+                  <th 
+                    style={{ width: colWidths.checkbox || 44 }} 
+                    className="p-3.5 text-center relative"
+                  >
                     <input 
                       type="checkbox"
                       checked={filteredPersonnel.length > 0 && selectedEmpIds.length === filteredPersonnel.length}
@@ -1603,15 +1722,170 @@ export function ApplicationDetail({
                       className="rounded border-gray-300 text-[#800020] focus:ring-[#800020] disabled:opacity-40"
                     />
                   </th>
-                  <th className="p-3.5">Personnel Name & Profile</th>
-                  <th className="p-3.5">Employee Code / QID</th>
-                  <th className="p-3.5">Department / Title</th>
-                  <th className="p-3.5">Location & Site Code</th>
-                  <th className="p-3.5">Access Codes & Areas</th>
-                  <th className="p-3.5">Assigned Pass #</th>
-                  <th className="p-3.5">Pass Validity Period</th>
-                  <th className="p-3.5">Member Status</th>
-                  {currentUser?.role !== 'viewer' && application.status !== 'archived' && <th className="p-3.5 text-right">Actions</th>}
+
+                  {/* Name Column */}
+                  <th 
+                    style={{ width: colWidths.name || 260 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Personnel Name & Profile</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('name', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'name' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Code Column */}
+                  <th 
+                    style={{ width: colWidths.code || 160 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Employee Code / QID</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('code', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'code' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Department Column */}
+                  <th 
+                    style={{ width: colWidths.dept || 180 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Department / Title</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('dept', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'dept' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Location Column */}
+                  <th 
+                    style={{ width: colWidths.location || 200 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Location & Site Code</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('location', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'location' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Access Codes Column */}
+                  <th 
+                    style={{ width: colWidths.access || 190 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Access Codes & Areas</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('access', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'access' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Assigned Pass Column */}
+                  <th 
+                    style={{ width: colWidths.passNum || 140 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Assigned Pass #</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('passNum', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'passNum' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Pass Validity Column */}
+                  <th 
+                    style={{ width: colWidths.validity || 210 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Pass Validity Period</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('validity', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'validity' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Member Status Column */}
+                  <th 
+                    style={{ width: colWidths.status || 150 }} 
+                    className="p-3.5 relative group"
+                  >
+                    <span className="truncate block">Member Status</span>
+                    <div 
+                      onMouseDown={(e) => startColResize('status', e)}
+                      className={cn(
+                        "absolute right-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                        resizingCol === 'status' && "bg-[#800020]/60"
+                      )}
+                      title="Drag to resize column"
+                    >
+                      <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                    </div>
+                  </th>
+
+                  {/* Actions Column */}
+                  {currentUser?.role !== 'viewer' && application.status !== 'archived' && (
+                    <th 
+                      style={{ width: colWidths.actions || 240 }} 
+                      className="p-3.5 text-right relative group"
+                    >
+                      <span className="truncate block">Actions</span>
+                      <div 
+                        onMouseDown={(e) => startColResize('actions', e)}
+                        className={cn(
+                          "absolute left-0 top-0 bottom-0 w-2.5 cursor-col-resize flex items-center justify-center hover:bg-slate-300/80 transition-colors z-10",
+                          resizingCol === 'actions' && "bg-[#800020]/60"
+                        )}
+                        title="Drag to resize column"
+                      >
+                        <div className="w-[1.5px] h-3.5 bg-slate-300 group-hover:bg-slate-500 rounded-full" />
+                      </div>
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">

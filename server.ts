@@ -4331,6 +4331,90 @@ app.post("/api/auth/reset-password", async (req, res) => {
     }
   });
 
+  // Current user profile and preferences endpoint
+  app.get("/api/users/profile", authorize([]), async (req, res) => {
+    let connection;
+    try {
+      const userId = (req.headers['x-user-id'] as string) || (req as any).user?.id;
+      if (!userId || userId.toLowerCase() === 'system') {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      connection = await getConnection();
+      const result = await connection.execute(
+        `SELECT id, email, role, displayName, photoURL, status, phone, jobTitle, department, division, project, organizationId, createdAt, lastLogin, preferences FROM users WHERE UPPER(id) = UPPER(:id)`,
+        [userId],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      if (!result.rows || result.rows.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      const user: any = toCamelCase(result.rows[0]);
+      if (user.preferences && typeof user.preferences === 'string') {
+        try {
+          user.preferences = JSON.parse(user.preferences);
+        } catch { /* ignore */ }
+      }
+      res.json(user);
+    } catch (err) {
+      console.error('Failed to get user profile:', err);
+      res.status(500).json({ error: "Failed to get user profile" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  app.patch("/api/users/profile", authorize([]), async (req, res) => {
+    let connection;
+    try {
+      const userId = (req.headers['x-user-id'] as string) || (req as any).user?.id;
+      if (!userId || userId.toLowerCase() === 'system') {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      connection = await getConnection();
+      const currentRes = await connection.execute(
+        `SELECT preferences FROM users WHERE UPPER(id) = UPPER(:id)`,
+        [userId],
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      if (!currentRes.rows || currentRes.rows.length === 0) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      let existingPrefs: any = {};
+      const rawPrefs = (currentRes.rows[0] as any)?.PREFERENCES || (currentRes.rows[0] as any)?.preferences;
+      if (rawPrefs) {
+        try {
+          existingPrefs = typeof rawPrefs === 'string' ? JSON.parse(rawPrefs) : rawPrefs;
+        } catch { /* ignore */ }
+      }
+
+      const updates: any = {};
+      if (req.body.preferences) {
+        const merged = { ...existingPrefs, ...req.body.preferences };
+        updates.PREFERENCES = JSON.stringify(merged);
+      }
+      if (req.body.displayName) updates.DISPLAYNAME = req.body.displayName;
+      if (req.body.phone) updates.PHONE = req.body.phone;
+      if (req.body.photoURL) updates.PHOTOURL = req.body.photoURL;
+
+      if (Object.keys(updates).length > 0) {
+        const setClause = Object.keys(updates).map(k => `${k} = :${k}`).join(', ');
+        await connection.execute(
+          `UPDATE users SET ${setClause} WHERE UPPER(id) = UPPER(:id)`,
+          { ...updates, id: userId }
+        );
+        await connection.commit();
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Failed to update user profile:', err);
+      res.status(500).json({ error: "Failed to update profile" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
   app.post("/api/users", authorize(['admin']), async (req, res) => {
     let connection;
     try {

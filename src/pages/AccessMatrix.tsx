@@ -1,14 +1,19 @@
 import React, { useState, useMemo } from 'react';
 import { motion } from 'motion/react';
-import { Shield, Filter, ChevronRight, CheckCircle2, XCircle, Clock, ArrowUpDown, ArrowUp, ArrowDown, Calendar, Printer, Download, FileSpreadsheet } from 'lucide-react';
+import { Shield, Filter, ChevronRight, CheckCircle2, XCircle, Clock, ArrowUpDown, ArrowUp, ArrowDown, Calendar, Printer, Download, FileSpreadsheet, Columns, Layers, SlidersHorizontal } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { Employee, Pass, Location, Category, AccessCode } from '../types';
+import { Employee, Pass, Location, Category, AccessCode, UserProfile } from '../types';
 import { cn, formatDate, parseToYMD, isPassInDateRange } from '../lib/utils';
 import { resolvePersonnelStatus } from '../utils/passStatus';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 import { DateRangeFilter } from '../components/common/DateRangeFilter';
+import { ColumnDefinition } from '../components/common/ColumnCustomizerModal';
+import { MatrixCustomizerModal } from '../components/matrix/MatrixCustomizerModal';
+import { useUserColumnPreferences } from '../hooks/useUserColumnPreferences';
 
 interface AccessMatrixProps {
+  currentUser?: UserProfile | null;
+  showToast?: (message: string, type?: 'success' | 'error') => void;
   employees?: Employee[];
   passes?: Pass[];
   locations?: Location[];
@@ -70,6 +75,8 @@ const isPassValidAndActive = (p: Pass) => {
 };
 
 export function AccessMatrix({ 
+  currentUser,
+  showToast,
   employees = [], 
   passes = [], 
   locations = [], 
@@ -84,6 +91,244 @@ export function AccessMatrix({
   const [sortField, setSortField] = useState<string>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
+  const [isCustomizerModalOpen, setIsCustomizerModalOpen] = useState<boolean>(false);
+
+  const availableColumns: ColumnDefinition[] = useMemo(() => [
+    { id: 'code', label: 'E-Code / Personnel ID' },
+    { id: 'name', label: 'Personnel Name', required: true },
+    { id: 'jobTitle', label: 'Job Title' },
+    { id: 'dept', label: 'Department' },
+    { id: 'division', label: 'Division' },
+    { id: 'qid', label: 'Qatar ID / Visa No' },
+    { id: 'status', label: 'Employment Status' }
+  ], []);
+
+  const defaultColumnIds = useMemo(() => [
+    'code', 'name', 'jobTitle'
+  ], []);
+
+  const {
+    columns: visibleColumns,
+    saveColumns,
+    isSaving: isSavingColumns
+  } = useUserColumnPreferences(currentUser, 'accessMatrixColumns', defaultColumnIds);
+
+  const columnConfigs: Record<string, { label: string; width: number; getValue: (emp: Employee) => string; getSortVal: (emp: Employee) => string }> = useMemo(() => ({
+    code: {
+      label: 'E-Code',
+      width: 100,
+      getValue: (emp) => emp.employeeId || '—',
+      getSortVal: (emp) => emp.employeeId || ''
+    },
+    name: {
+      label: 'Personnel Name',
+      width: 280,
+      getValue: (emp) => emp.name || '—',
+      getSortVal: (emp) => emp.name || ''
+    },
+    jobTitle: {
+      label: 'Job Title',
+      width: 140,
+      getValue: (emp) => emp.jobTitle || 'N/A',
+      getSortVal: (emp) => emp.jobTitle || ''
+    },
+    dept: {
+      label: 'Department',
+      width: 130,
+      getValue: (emp) => emp.department || '—',
+      getSortVal: (emp) => emp.department || ''
+    },
+    division: {
+      label: 'Division',
+      width: 120,
+      getValue: (emp) => emp.division || '—',
+      getSortVal: (emp) => emp.division || ''
+    },
+    qid: {
+      label: 'QID / Visa No',
+      width: 130,
+      getValue: (emp) => emp.qatarId || emp.qidVisaNumber || '—',
+      getSortVal: (emp) => emp.qatarId || emp.qidVisaNumber || ''
+    },
+    status: {
+      label: 'Status',
+      width: 100,
+      getValue: (emp) => emp.status || 'Active',
+      getSortVal: (emp) => emp.status || ''
+    }
+  }), []);
+
+  const stickyLeftPositions = useMemo(() => {
+    const positions: Record<string, number> = {};
+    let currentLeft = 0;
+    visibleColumns.forEach(colId => {
+      positions[colId] = currentLeft;
+      const w = columnConfigs[colId]?.width || 120;
+      currentLeft += w;
+    });
+    return positions;
+  }, [visibleColumns, columnConfigs]);
+
+  const getLocationSortRank = (loc: Location): number => {
+    const name = (loc.name || '').toLowerCase().trim();
+    const code = (loc.code || '').toLowerCase().trim();
+
+    // 1. Ras Laffan (RL / RLIC)
+    if (
+      code === 'rl' || 
+      code === 'rlic' || 
+      name.startsWith('ras laffan') || 
+      name.includes('ras laffan') ||
+      name === 'rl' ||
+      name === 'rlic'
+    ) {
+      return 1;
+    }
+
+    // 2. Mesaieed Industrial City (MIC)
+    if (
+      code === 'mic' || 
+      name.startsWith('mesaieed') || 
+      name.includes('mesaieed') ||
+      name.includes('(mic)') ||
+      name === 'mic'
+    ) {
+      return 2;
+    }
+
+    // 3. Dukhan Industrial City (DK / DIC)
+    if (
+      code === 'dk' || 
+      code === 'dic' || 
+      name.startsWith('dukhan') || 
+      name.includes('dukhan') ||
+      name === 'dk'
+    ) {
+      return 3;
+    }
+
+    return 99;
+  };
+
+  const defaultLocationIds = useMemo(() => {
+    const list: string[] = [];
+    categories.forEach(cat => {
+      const locs = locations.filter(loc => String(loc.categoryId) === String(cat.id));
+      locs.sort((a, b) => {
+        const rankA = getLocationSortRank(a);
+        const rankB = getLocationSortRank(b);
+        if (rankA !== rankB) return rankA - rankB;
+        return (a.name || '').localeCompare(b.name || '');
+      });
+      locs.forEach(l => list.push(l.id));
+    });
+    const uncategorized = locations.filter(loc => !loc.categoryId || !categories.some(c => String(c.id) === String(loc.categoryId)));
+    uncategorized.sort((a, b) => {
+      const rankA = getLocationSortRank(a);
+      const rankB = getLocationSortRank(b);
+      if (rankA !== rankB) return rankA - rankB;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    uncategorized.forEach(l => list.push(l.id));
+    return list;
+  }, [categories, locations]);
+
+  const {
+    columns: arrangedLocationIds,
+    saveColumns: saveLocationPreferences,
+    isSaving: isSavingLocations
+  } = useUserColumnPreferences(currentUser, 'accessMatrixLocations', defaultLocationIds);
+
+  const groupedLocations = useMemo(() => {
+    const groups: Record<string, Location[]> = {};
+    const locOrderMap = new Map<string, number>();
+    arrangedLocationIds.forEach((id, idx) => locOrderMap.set(String(id), idx));
+
+    const sortLocs = (locs: Location[]) => {
+      return [...locs].sort((a, b) => {
+        const hasA = locOrderMap.has(String(a.id));
+        const hasB = locOrderMap.has(String(b.id));
+        if (hasA && hasB) {
+          return (locOrderMap.get(String(a.id))!) - (locOrderMap.get(String(b.id))!);
+        }
+        const rankA = getLocationSortRank(a);
+        const rankB = getLocationSortRank(b);
+        if (rankA !== rankB) return rankA - rankB;
+        return (a.name || '').localeCompare(b.name || '');
+      });
+    };
+
+    categories.forEach(cat => {
+      const catLocs = locations.filter(loc => String(loc.categoryId) === String(cat.id));
+      groups[cat.id] = sortLocs(catLocs);
+    });
+
+    // Group uncategorized locations if any exist
+    const uncategorized = locations.filter(loc => !loc.categoryId || !categories.some(c => String(c.id) === String(loc.categoryId)));
+    if (uncategorized.length > 0) {
+      groups['uncategorized'] = sortLocs(uncategorized);
+    }
+    return groups;
+  }, [categories, locations, arrangedLocationIds]);
+
+  const defaultCategoryIds = useMemo(() => {
+    const ids = categories.map(c => c.id);
+    if ((groupedLocations['uncategorized']?.length || 0) > 0) {
+      ids.push('uncategorized');
+    }
+    return ids;
+  }, [categories, groupedLocations]);
+
+  const {
+    columns: arrangedCategoryIds,
+    saveColumns: saveCategoryPreferences,
+    isSaving: isSavingCategories
+  } = useUserColumnPreferences(currentUser, 'accessMatrixCategories', defaultCategoryIds);
+
+  const activeCategories = useMemo(() => {
+    // Lookup map of all available categories
+    const map = new Map<string, Category>();
+    categories.forEach(c => map.set(String(c.id), c));
+    if ((groupedLocations['uncategorized']?.length || 0) > 0) {
+      map.set('uncategorized', { id: 'uncategorized', name: 'General / Uncategorized' } as Category);
+    }
+
+    // Specific category filter from dropdown
+    if (filterCategory !== 'all') {
+      const single = map.get(String(filterCategory));
+      if (single && (groupedLocations[single.id]?.length || 0) > 0) {
+        return [single];
+      }
+      return [];
+    }
+
+    // Use user's arranged & selected category IDs in order
+    const result: Category[] = [];
+    const seen = new Set<string>();
+
+    arrangedCategoryIds.forEach(id => {
+      const cat = map.get(String(id));
+      if (cat && (groupedLocations[cat.id]?.length || 0) > 0) {
+        result.push(cat);
+        seen.add(String(cat.id));
+      }
+    });
+
+    // If user has not yet customized category order, include all categories with locations
+    if (arrangedCategoryIds.length === 0) {
+      categories.forEach(cat => {
+        if (!seen.has(String(cat.id)) && (groupedLocations[cat.id]?.length || 0) > 0) {
+          result.push(cat);
+          seen.add(String(cat.id));
+        }
+      });
+      if ((groupedLocations['uncategorized']?.length || 0) > 0 && !seen.has('uncategorized')) {
+        result.push({ id: 'uncategorized', name: 'General / Uncategorized' } as Category);
+      }
+    }
+
+    return result;
+  }, [categories, filterCategory, groupedLocations, arrangedCategoryIds]);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -104,8 +349,8 @@ export function AccessMatrix({
     const r2 = [filterInfo];
     const r3 = []; // empty spacing row
 
-    // Level 1: S/N, E-Code, Name, Job Title, then Categories
-    const r4: string[] = ["S/N", "E-Code", "Personnel Name", "Job Title"];
+    // Level 1: S/N, Dynamic Visible Columns, then Categories
+    const r4: string[] = ["S/N", ...visibleColumns.map(colId => columnConfigs[colId]?.label || colId)];
     activeCategories.forEach(cat => {
       const locCount = groupedLocations[cat.id]?.length || 0;
       r4.push(cat.name);
@@ -115,7 +360,7 @@ export function AccessMatrix({
     });
 
     // Level 2: Locations
-    const r5: string[] = ["", "", "", ""];
+    const r5: string[] = ["", ...visibleColumns.map(() => "")];
     activeCategories.forEach(cat => {
       groupedLocations[cat.id]?.forEach(loc => {
         r5.push(loc.name);
@@ -124,7 +369,7 @@ export function AccessMatrix({
     });
 
     // Level 3: Codes / Expiry
-    const r6: string[] = ["", "", "", ""];
+    const r6: string[] = ["", ...visibleColumns.map(() => "")];
     activeCategories.forEach(cat => {
       groupedLocations[cat.id]?.forEach(() => {
         r6.push("Codes");
@@ -138,9 +383,7 @@ export function AccessMatrix({
     filteredEmployees.forEach((emp, index) => {
       const row: string[] = [
         (index + 1).toString(),
-        emp.employeeId || '—',
-        emp.name || '—',
-        emp.jobTitle || 'N/A'
+        ...visibleColumns.map(colId => columnConfigs[colId]?.getValue(emp) || '—')
       ];
 
       const empPasses = passes.filter(p => isPassForEmployee(p, emp) && isPassInDateRange(p, startDateFilter, endDateFilter));
@@ -213,7 +456,10 @@ export function AccessMatrix({
 
     const worksheet = XLSX.utils.aoa_to_sheet(rows);
 
-    const colWidths = [{ wch: 6 }, { wch: 14 }, { wch: 30 }, { wch: 20 }];
+    const colWidths = [
+      { wch: 6 },
+      ...visibleColumns.map(colId => ({ wch: Math.max(12, Math.round((columnConfigs[colId]?.width || 120) / 7)) }))
+    ];
     activeCategories.forEach(cat => {
       groupedLocations[cat.id]?.forEach(() => {
         colWidths.push({ wch: 12 });
@@ -292,7 +538,10 @@ export function AccessMatrix({
     }).sort((a, b) => {
       let valA: any = '';
       let valB: any = '';
-      if (sortField === 'name') {
+      if (columnConfigs[sortField]) {
+        valA = columnConfigs[sortField].getSortVal(a);
+        valB = columnConfigs[sortField].getSortVal(b);
+      } else if (sortField === 'name') {
         valA = a.name || '';
         valB = b.name || '';
       } else if (sortField === 'code') {
@@ -310,31 +559,7 @@ export function AccessMatrix({
       if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [employees, passes, locations, globalSearch, filterStatus, filterCategory, sortField, sortOrder, startDateFilter, endDateFilter]);
-
-  const groupedLocations = useMemo(() => {
-    const groups: Record<string, Location[]> = {};
-    categories.forEach(cat => {
-      groups[cat.id] = locations.filter(loc => String(loc.categoryId) === String(cat.id));
-    });
-    // Group uncategorized locations if any exist
-    const uncategorized = locations.filter(loc => !loc.categoryId || !categories.some(c => String(c.id) === String(loc.categoryId)));
-    if (uncategorized.length > 0) {
-      groups['uncategorized'] = uncategorized;
-    }
-    return groups;
-  }, [categories, locations]);
-
-  const activeCategories = useMemo(() => {
-    const active = categories.filter(cat => 
-      (filterCategory === 'all' || String(cat.id) === String(filterCategory)) && 
-      (groupedLocations[cat.id]?.length || 0) > 0
-    );
-    if ((filterCategory === 'all' || filterCategory === 'uncategorized') && groupedLocations['uncategorized']?.length > 0) {
-      return [...active, { id: 'uncategorized', name: 'General Locations' } as Category];
-    }
-    return active;
-  }, [categories, filterCategory, groupedLocations]);
+  }, [employees, passes, locations, globalSearch, filterStatus, filterCategory, sortField, sortOrder, startDateFilter, endDateFilter, columnConfigs]);
 
   return (
     <div className="space-y-4 flex-1 flex flex-col w-full min-h-0 h-[calc(100vh-90px)]">
@@ -369,10 +594,20 @@ export function AccessMatrix({
             onChange={(e) => setFilterCategory(e.target.value)}
             className="px-3 py-1.5 bg-white border border-[#E5E7EB] rounded-xl text-[10px] font-bold outline-none focus:ring-1 focus:ring-[#800020]"
           >
-            <option value="all">All Categories</option>
-            {categories.map(cat => (
-              <option key={cat.id} value={cat.id}>{cat.name}</option>
-            ))}
+            <option value="all">All Arranged Categories ({activeCategories.length})</option>
+            {categories.map(cat => {
+              const count = groupedLocations[cat.id]?.length || 0;
+              return (
+                <option key={cat.id} value={cat.id}>
+                  {cat.name} ({count} {count === 1 ? 'loc' : 'locs'})
+                </option>
+              );
+            })}
+            {(groupedLocations['uncategorized']?.length || 0) > 0 && (
+              <option value="uncategorized">
+                General Locations ({groupedLocations['uncategorized'].length} locs)
+              </option>
+            )}
           </select>
           <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#E5E7EB] rounded-xl">
             <ArrowUpDown size={12} className="text-[#800020]" />
@@ -399,6 +634,15 @@ export function AccessMatrix({
           <div className="h-4 w-px bg-[#E5E7EB] mx-0.5"></div>
 
           <button
+            onClick={() => setIsCustomizerModalOpen(true)}
+            className="px-3 py-1.5 bg-white border border-[#E5E7EB] text-[#800020] hover:bg-rose-50 hover:border-rose-200 rounded-xl font-bold text-[10px] uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+            title="Customize and arrange matrix columns and pass categories in a single view"
+          >
+            <SlidersHorizontal size={13} />
+            <span>Customize Columns & Categories</span>
+          </button>
+
+          <button
             onClick={() => setIsPrintModalOpen(true)}
             className="px-3 py-1.5 bg-white border border-[#E5E7EB] text-[#800020] hover:bg-rose-50 hover:border-rose-200 rounded-xl font-bold text-[10px] uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
             title="Print or Export current Access Matrix to PDF"
@@ -422,11 +666,14 @@ export function AccessMatrix({
         <div className="overflow-auto flex-1 min-h-0 h-full">
           <table className="text-left border-collapse table-fixed w-max min-w-full">
             <colgroup>
-              <col className="w-[100px] min-w-[100px] max-w-[100px]" />
-              <col className="w-[320px] min-w-[320px] max-w-[320px]" />
-              <col className="w-[140px] min-w-[140px] max-w-[140px]" />
+              {visibleColumns.map(colId => {
+                const w = columnConfigs[colId]?.width || 120;
+                return (
+                  <col key={colId} style={{ width: `${w}px`, minWidth: `${w}px`, maxWidth: `${w}px` }} />
+                );
+              })}
               {activeCategories.map(cat => 
-                groupedLocations[cat.id].map(loc => (
+                groupedLocations[cat.id]?.map(loc => (
                   <React.Fragment key={loc.id}>
                     <col className="w-[110px]" />
                     <col className="w-[90px]" />
@@ -437,52 +684,43 @@ export function AccessMatrix({
             <thead className="sticky top-0 z-30">
               {/* Level 1: Categories */}
               <tr className="bg-[#F8FAFC] border-b border-[#E5E7EB]">
-                <th 
-                  rowSpan={3} 
-                  onClick={() => handleSort('code')}
-                  className="sticky left-0 z-40 bg-[#F8FAFC] w-[100px] min-w-[100px] max-w-[100px] px-3 py-3 align-middle text-[10px] font-extrabold text-[#374151] uppercase tracking-wider border-r border-b border-[#E5E7EB] cursor-pointer hover:bg-[#F1F5F9] transition-colors select-none group"
-                >
-                  <div className="flex items-center justify-between gap-1 min-w-0">
-                    <span className="truncate" title="E-Code">E-Code</span>
-                    {sortField === 'code' ? (
-                      sortOrder === 'asc' ? <ArrowUp size={11} className="text-[#800020] flex-shrink-0" /> : <ArrowDown size={11} className="text-[#800020] flex-shrink-0" />
-                    ) : (
-                      <ArrowUpDown size={11} className="text-gray-400 opacity-40 group-hover:opacity-100 flex-shrink-0" />
-                    )}
-                  </div>
-                </th>
-                <th 
-                  rowSpan={3} 
-                  onClick={() => handleSort('name')}
-                  className="sticky left-[100px] z-40 bg-[#F8FAFC] w-[320px] min-w-[320px] max-w-[320px] px-3 py-3 align-middle text-[10px] font-extrabold text-[#374151] uppercase tracking-wider border-r border-b border-[#E5E7EB] cursor-pointer hover:bg-[#F1F5F9] transition-colors select-none group"
-                >
-                  <div className="flex items-center justify-between gap-1 min-w-0">
-                    <span className="truncate" title="Name">Name</span>
-                    {sortField === 'name' ? (
-                      sortOrder === 'asc' ? <ArrowUp size={11} className="text-[#800020] flex-shrink-0" /> : <ArrowDown size={11} className="text-[#800020] flex-shrink-0" />
-                    ) : (
-                      <ArrowUpDown size={11} className="text-gray-400 opacity-40 group-hover:opacity-100 flex-shrink-0" />
-                    )}
-                  </div>
-                </th>
-                <th 
-                  rowSpan={3} 
-                  onClick={() => handleSort('jobTitle')}
-                  className="sticky left-[420px] z-40 bg-[#F8FAFC] w-[140px] min-w-[140px] max-w-[140px] px-3 py-3 align-middle text-[10px] font-extrabold text-[#374151] uppercase tracking-wider border-r border-b border-[#E5E7EB] shadow-[3px_0_6px_-2px_rgba(0,0,0,0.08)] cursor-pointer hover:bg-[#F1F5F9] transition-colors select-none group"
-                >
-                  <div className="flex items-center justify-between gap-1 min-w-0">
-                    <span className="truncate" title="Job Title">Job Title</span>
-                    {sortField === 'jobTitle' ? (
-                      sortOrder === 'asc' ? <ArrowUp size={11} className="text-[#800020] flex-shrink-0" /> : <ArrowDown size={11} className="text-[#800020] flex-shrink-0" />
-                    ) : (
-                      <ArrowUpDown size={11} className="text-gray-400 opacity-40 group-hover:opacity-100 flex-shrink-0" />
-                    )}
-                  </div>
-                </th>
+                {visibleColumns.map((colId, cIdx) => {
+                  const isLast = cIdx === visibleColumns.length - 1;
+                  const cfg = columnConfigs[colId];
+                  const left = stickyLeftPositions[colId] ?? 0;
+                  const w = cfg?.width || 120;
+
+                  return (
+                    <th 
+                      key={colId}
+                      rowSpan={3} 
+                      onClick={() => handleSort(colId)}
+                      style={{ 
+                        left: `${left}px`,
+                        width: `${w}px`,
+                        minWidth: `${w}px`,
+                        maxWidth: `${w}px`
+                      }}
+                      className={cn(
+                        "sticky z-40 bg-[#F8FAFC] px-3 py-3 align-middle text-[10px] font-extrabold text-[#374151] uppercase tracking-wider border-r border-b border-[#E5E7EB] cursor-pointer hover:bg-[#F1F5F9] transition-colors select-none group",
+                        isLast && "shadow-[3px_0_6px_-2px_rgba(0,0,0,0.08)]"
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-1 min-w-0">
+                        <span className="truncate" title={cfg?.label || colId}>{cfg?.label || colId}</span>
+                        {sortField === colId ? (
+                          sortOrder === 'asc' ? <ArrowUp size={11} className="text-[#800020] flex-shrink-0" /> : <ArrowDown size={11} className="text-[#800020] flex-shrink-0" />
+                        ) : (
+                          <ArrowUpDown size={11} className="text-gray-400 opacity-40 group-hover:opacity-100 flex-shrink-0" />
+                        )}
+                      </div>
+                    </th>
+                  );
+                })}
                 {activeCategories.map(cat => (
                   <th 
                     key={cat.id} 
-                    colSpan={groupedLocations[cat.id].length * 2}
+                    colSpan={(groupedLocations[cat.id]?.length || 0) * 2}
                     className="px-4 py-2 text-[10px] font-bold text-[#800020] uppercase tracking-widest text-center border-r border-[#E5E7EB]"
                   >
                     {cat.name}
@@ -492,7 +730,7 @@ export function AccessMatrix({
               {/* Level 2: Locations */}
               <tr className="bg-[#F9FAFB] border-b border-[#E5E7EB]">
                 {activeCategories.map(cat => (
-                  groupedLocations[cat.id].map(loc => (
+                  groupedLocations[cat.id]?.map(loc => (
                     <th 
                       key={loc.id} 
                       colSpan={2}
@@ -507,7 +745,7 @@ export function AccessMatrix({
               {/* Level 3: Access Codes & Expiry */}
               <tr className="bg-[#F9FAFB] border-b border-[#E5E7EB]">
                 {activeCategories.map(cat => (
-                  groupedLocations[cat.id].map(loc => (
+                  groupedLocations[cat.id]?.map(loc => (
                     <React.Fragment key={loc.id}>
                       <th className="px-2 py-1 text-[9px] font-bold text-[#9CA3AF] uppercase tracking-widest text-center border-r border-[#E5E7EB]">
                         Codes
@@ -530,15 +768,44 @@ export function AccessMatrix({
               ) : (
                 filteredEmployees.map(emp => (
                   <tr key={emp.id} className="hover:bg-[#F9FAFB] transition-colors group">
-                    <td className="sticky left-0 z-20 bg-white group-hover:bg-[#F8FAFC] w-[100px] min-w-[100px] max-w-[100px] px-3 py-2.5 border-r border-[#E5E7EB]">
-                      <span className="text-[10px] font-mono font-bold text-[#800020] truncate block" title={emp.employeeId || '—'}>{emp.employeeId || '—'}</span>
-                    </td>
-                    <td className="sticky left-[100px] z-20 bg-white group-hover:bg-[#F8FAFC] w-[320px] min-w-[320px] max-w-[320px] px-3 py-2.5 border-r border-[#E5E7EB]">
-                      <p className="text-[10px] font-bold text-[#1A1A1A] leading-tight truncate" title={emp.name}>{emp.name}</p>
-                    </td>
-                    <td className="sticky left-[420px] z-20 bg-white group-hover:bg-[#F8FAFC] w-[140px] min-w-[140px] max-w-[140px] px-3 py-2.5 border-r border-[#E5E7EB] shadow-[3px_0_6px_-2px_rgba(0,0,0,0.08)]">
-                      <span className="text-[10px] font-semibold text-[#4B5563] truncate block" title={emp.jobTitle || 'N/A'}>{emp.jobTitle || 'N/A'}</span>
-                    </td>
+                    {visibleColumns.map((colId, cIdx) => {
+                      const isLast = cIdx === visibleColumns.length - 1;
+                      const cfg = columnConfigs[colId];
+                      const left = stickyLeftPositions[colId] ?? 0;
+                      const w = cfg?.width || 120;
+                      const val = cfg ? cfg.getValue(emp) : '—';
+
+                      return (
+                        <td 
+                          key={colId}
+                          style={{ 
+                            left: `${left}px`,
+                            width: `${w}px`,
+                            minWidth: `${w}px`,
+                            maxWidth: `${w}px`
+                          }}
+                          className={cn(
+                            "sticky z-20 bg-white group-hover:bg-[#F8FAFC] px-3 py-2.5 border-r border-[#E5E7EB]",
+                            isLast && "shadow-[3px_0_6px_-2px_rgba(0,0,0,0.08)]"
+                          )}
+                        >
+                          {colId === 'code' ? (
+                            <span className="text-[10px] font-mono font-bold text-[#800020] truncate block" title={val}>{val}</span>
+                          ) : colId === 'name' ? (
+                            <p className="text-[10px] font-bold text-[#1A1A1A] leading-tight truncate" title={val}>{val}</p>
+                          ) : colId === 'status' ? (
+                            <span className={cn(
+                              "px-1.5 py-0.5 rounded text-[9px] font-bold uppercase",
+                              val.toLowerCase() === 'active' ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-700"
+                            )}>
+                              {val}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold text-[#4B5563] truncate block" title={val}>{val}</span>
+                          )}
+                        </td>
+                      );
+                    })}
                     {(() => {
                       const empPasses = passes.filter(p => isPassForEmployee(p, emp) && isPassInDateRange(p, startDateFilter, endDateFilter));
                       const validActivePasses = empPasses.filter(p => isPassValidAndActive(p));
@@ -695,9 +962,11 @@ export function AccessMatrix({
               <thead>
                 <tr className="bg-gray-100 border-b border-gray-300">
                   <th className="p-1.5 border-r border-gray-300 font-bold text-gray-700 text-center w-8">S/N</th>
-                  <th className="p-1.5 border-r border-gray-300 font-bold text-gray-700">E-Code</th>
-                  <th className="p-1.5 border-r border-gray-300 font-bold text-gray-700">Name</th>
-                  <th className="p-1.5 border-r border-gray-300 font-bold text-gray-700">Job Title</th>
+                  {visibleColumns.map(colId => (
+                    <th key={colId} className="p-1.5 border-r border-gray-300 font-bold text-gray-700">
+                      {columnConfigs[colId]?.label || colId}
+                    </th>
+                  ))}
                   {activeCategories.map(cat => (
                     <th 
                       key={cat.id} 
@@ -710,9 +979,9 @@ export function AccessMatrix({
                 </tr>
                 <tr className="bg-gray-50 border-b border-gray-300">
                   <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
+                  {visibleColumns.map(colId => (
+                    <th key={colId} className="p-1 border-r border-gray-300"></th>
+                  ))}
                   {activeCategories.map(cat => 
                     groupedLocations[cat.id]?.map(loc => (
                       <th key={loc.id} colSpan={2} className="p-1 border-r border-gray-300 text-center text-gray-600 font-semibold">
@@ -723,9 +992,9 @@ export function AccessMatrix({
                 </tr>
                 <tr className="bg-gray-50 border-b border-gray-300 text-[9px] text-gray-500">
                   <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
-                  <th className="p-1 border-r border-gray-300"></th>
+                  {visibleColumns.map(colId => (
+                    <th key={colId} className="p-1 border-r border-gray-300"></th>
+                  ))}
                   {activeCategories.map(cat => 
                     groupedLocations[cat.id]?.map(loc => (
                       <React.Fragment key={loc.id}>
@@ -751,9 +1020,22 @@ export function AccessMatrix({
                   return (
                     <tr key={emp.id} className="hover:bg-gray-50">
                       <td className="p-1.5 border-r border-gray-200 font-bold text-gray-500 text-center">{index + 1}</td>
-                      <td className="p-1.5 border-r border-gray-200 font-mono font-bold text-[#800020]">{emp.employeeId || '—'}</td>
-                      <td className="p-1.5 border-r border-gray-200 font-bold text-gray-900">{emp.name}</td>
-                      <td className="p-1.5 border-r border-gray-200 text-gray-600">{emp.jobTitle || 'N/A'}</td>
+                      {visibleColumns.map(colId => {
+                        const val = columnConfigs[colId]?.getValue(emp) || '—';
+                        return (
+                          <td 
+                            key={colId} 
+                            className={cn(
+                              "p-1.5 border-r border-gray-200",
+                              colId === 'code' && "font-mono font-bold text-[#800020]",
+                              colId === 'name' && "font-bold text-gray-900",
+                              colId !== 'code' && colId !== 'name' && "text-gray-600"
+                            )}
+                          >
+                            {val}
+                          </td>
+                        );
+                      })}
                       {activeCategories.map(cat => 
                         groupedLocations[cat.id]?.map(loc => {
                           const activeLocPasses = validActivePasses.filter(p => p.locationId === loc.id);
@@ -848,6 +1130,33 @@ export function AccessMatrix({
           </div>
         </div>
       </PrintExportModal>
+
+      <MatrixCustomizerModal
+        isOpen={isCustomizerModalOpen}
+        onClose={() => setIsCustomizerModalOpen(false)}
+        availableColumns={availableColumns}
+        currentColumnIds={visibleColumns}
+        defaultColumnIds={defaultColumnIds}
+        onSaveColumns={async (newCols) => {
+          await saveColumns(newCols);
+        }}
+        categories={categories}
+        groupedLocations={groupedLocations}
+        currentCategoryIds={arrangedCategoryIds}
+        defaultCategoryIds={defaultCategoryIds}
+        onSaveCategories={async (newCats) => {
+          await saveCategoryPreferences(newCats);
+        }}
+        currentLocationIds={arrangedLocationIds}
+        defaultLocationIds={defaultLocationIds}
+        onSaveLocations={async (newLocs) => {
+          await saveLocationPreferences(newLocs);
+          if (showToast) {
+            showToast('Matrix settings and columns arrangement saved to your profile', 'success');
+          }
+        }}
+        isSaving={isSavingColumns || isSavingCategories || isSavingLocations}
+      />
     </div>
   );
 }

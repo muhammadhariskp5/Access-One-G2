@@ -164,6 +164,12 @@ export interface UserViewPreferences {
   enableSound?: boolean;
   expiryWarningDays?: number;
   badgeStyle?: 'minimal' | 'bold';
+  applicationColumns?: string[];
+  personnelColumns?: string[];
+  passColumns?: string[];
+  accessMatrixColumns?: string[];
+  accessMatrixCategories?: string[];
+  accessMatrixLocations?: string[];
 }
 
 export interface UserProfile {
