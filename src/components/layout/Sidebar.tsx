@@ -18,10 +18,12 @@ import {
   Key,
   Crown,
   Sparkles,
-  Zap
+  Zap,
+  Bell
 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { cn } from '../../lib/utils';
+import { useNotifications } from '../../context/NotificationContext';
 import { UserProfile, BrandingSettings, isPowerAdmin } from '../../types';
 
 interface SidebarProps {
@@ -79,6 +81,7 @@ export function Sidebar({ user, company, handleLogout }: SidebarProps) {
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
   const currentTab = searchParams.get('tab');
+  const { unreadCount } = useNotifications();
   
   const powerAdmin = isPowerAdmin(user);
   const isAdmin = user.role === 'admin' || powerAdmin;
@@ -173,6 +176,17 @@ export function Sidebar({ user, company, handleLogout }: SidebarProps) {
               label="Employees" 
               to="/employees" 
               active={location.pathname.startsWith('/employees')} 
+            />
+            <SidebarItem 
+              icon={<Bell />} 
+              label="Notifications" 
+              to="/notifications" 
+              active={location.pathname === '/notifications'} 
+              badge={unreadCount > 0 ? (
+                <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-[#800020] text-white leading-none">
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              ) : undefined}
             />
           </nav>
         </div>

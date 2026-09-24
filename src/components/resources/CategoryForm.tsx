@@ -11,10 +11,12 @@ interface CategoryFormProps {
 export function CategoryForm({ category, onClose, onSuccess }: CategoryFormProps) {
   const [name, setName] = useState(category?.name || '');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
     try {
       if (category) {
         await apiFetch(`/api/categories/${category.id}`, {
@@ -30,7 +32,7 @@ export function CategoryForm({ category, onClose, onSuccess }: CategoryFormProps
       await onSuccess();
       onClose();
     } catch (err: any) {
-      alert(err.message);
+      setError(err.message || 'Failed to save category');
     } finally {
       setLoading(false);
     }
@@ -38,6 +40,11 @@ export function CategoryForm({ category, onClose, onSuccess }: CategoryFormProps
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {error && (
+        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium">
+          {error}
+        </div>
+      )}
       <div className="space-y-1.5">
         <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Category Name *</label>
         <input 

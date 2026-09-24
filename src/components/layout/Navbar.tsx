@@ -16,7 +16,8 @@ import {
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { UserProfile, BrandingSettings, Employee, isPowerAdmin } from '../../types';
 import { SearchInput } from '../common/SearchInput';
-import { cn, apiFetch } from '../../lib/utils';
+import { cn } from '../../lib/utils';
+import { NotificationBellDropdown } from '../notifications/NotificationBellDropdown';
 
 interface NavbarProps {
   user: UserProfile;
@@ -39,56 +40,6 @@ export function Navbar({
   const navigate = useNavigate();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const notifRef = useRef<HTMLDivElement>(null);
-  const [notifications, setNotifications] = useState<any[]>([]);
-  const [isNotifOpen, setIsNotifOpen] = useState(false);
-  const unreadCount = notifications.filter((n: any) => !n.isRead).length;
-
-  useEffect(() => {
-    if (!user) return;
-    const fetchNotifications = async () => {
-      try {
-        const res = await apiFetch('/api/notifications');
-        const data = await res.json();
-        if (Array.isArray(data)) setNotifications(data);
-      } catch (e) {
-        console.error('Failed to load notifications', e);
-      }
-    };
-    fetchNotifications();
-    const interval = setInterval(fetchNotifications, 15000);
-    return () => clearInterval(interval);
-  }, [user]);
-
-  useEffect(() => {
-    function handleClickOutsideNotif(event: MouseEvent) {
-      if (notifRef.current && !notifRef.current.contains(event.target as Node)) {
-        setIsNotifOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutsideNotif);
-    return () => document.removeEventListener('mousedown', handleClickOutsideNotif);
-  }, []);
-
-  const handleMarkAllRead = async () => {
-    try {
-      await apiFetch('/api/notifications/mark-all-read', { method: 'PATCH' });
-      setNotifications((prev: any[]) => prev.map((n) => ({ ...n, isRead: true })));
-    } catch (e) {
-      console.error('Failed to mark all notifications read', e);
-    }
-  };
-
-  const handleNotificationClick = async (notif: any) => {
-    if (!notif.isRead) {
-      try {
-        await apiFetch(`/api/notifications/${notif.id}/read`, { method: 'PATCH' });
-        setNotifications((prev: any[]) => prev.map((n) => n.id === notif.id ? { ...n, isRead: true } : n));
-      } catch (e) {
-        console.error('Failed to mark notification read', e);
-      }
-    }
-  };
   
   const isAdmin = user.role === 'admin' || user.role === 'power_admin';
 
@@ -262,56 +213,8 @@ export function Navbar({
           </div>
         )}
         
-        {/* Notifications Bell */}
-        <div className="relative" ref={notifRef}>
-          <button
-            type="button"
-            onClick={() => setIsNotifOpen(!isNotifOpen)}
-            className="relative flex items-center justify-center w-9 h-9 rounded-xl hover:bg-slate-100/70 transition-colors"
-            aria-label="Notifications"
-          >
-            <Bell size={18} className="text-slate-500" />
-            {unreadCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 flex items-center justify-center h-4 min-w-[16px] px-1 rounded-full bg-[#800020] text-white text-[9px] font-bold">
-                {unreadCount > 9 ? '9+' : unreadCount}
-              </span>
-            )}
-          </button>
-          {isNotifOpen && (
-            <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto bg-white rounded-xl border border-slate-200 shadow-xl z-50">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">Notifications</span>
-                {unreadCount > 0 && (
-                  <button onClick={handleMarkAllRead} className="text-[11px] font-bold text-[#800020] hover:underline">
-                    Mark all read
-                  </button>
-                )}
-              </div>
-              {notifications.length === 0 ? (
-                <div className="px-4 py-8 text-center text-xs text-slate-400">No notifications yet</div>
-              ) : (
-                notifications.map((notif: any) => (
-                  <button
-                    key={notif.id}
-                    onClick={() => handleNotificationClick(notif)}
-                    className={cn(
-                      "w-full text-left px-4 py-3 border-b border-slate-50 hover:bg-slate-50 transition-colors",
-                      !notif.isRead && "bg-[#800020]/5"
-                    )}
-                  >
-                    <div className="flex items-start gap-2">
-                      {!notif.isRead && <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#800020] shrink-0" />}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[12px] font-bold text-slate-800 truncate">{notif.title}</p>
-                        {notif.message && <p className="text-[11px] text-slate-500 mt-0.5 line-clamp-2">{notif.message}</p>}
-                      </div>
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-        </div>
+        {/* Notifications Bell Dropdown */}
+        <NotificationBellDropdown />
 
         {/* User Profile Navigation Dropdown */}
         <div className="relative" ref={menuRef}>
@@ -376,6 +279,14 @@ export function Navbar({
                 >
                   <User size={13} className="text-slate-400" />
                   <span>My Profile</span>
+                </Link>
+
+                <Link
+                  to="/notifications"
+                  className="flex items-center gap-2.5 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-[#800020] transition-colors"
+                >
+                  <Bell size={13} className="text-slate-400" />
+                  <span>Notification Center</span>
                 </Link>
 
                 <Link

@@ -20,8 +20,10 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
   const [data, setData] = useState<Partial<AccessCode>>(accessCode || { locationId: locationId || locations[0]?.id });
   const [isImporting, setIsImporting] = useState(mode === 'import');
   const [importData, setImportData] = useState<any[] | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setErrorMessage(null);
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -59,7 +61,7 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
         setImportData(validatedData);
       } catch (err) {
         console.error("Error parsing Excel:", err);
-        alert("Failed to parse Excel file. Please ensure it has the correct columns.");
+        setErrorMessage("Failed to parse Excel file. Please ensure it has the correct columns.");
       }
     };
     reader.readAsArrayBuffer(file);
@@ -68,6 +70,7 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
 
   const handleImport = async () => {
     if (!importData) return;
+    setErrorMessage(null);
     try {
       const res = await apiFetch('/api/accessCodes/batch', {
         method: 'POST',
@@ -78,12 +81,13 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
         onClose();
       }
     } catch (err: any) {
-      alert(err.message);
+      setErrorMessage(err.message || "Batch import failed");
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(null);
     try {
       if (accessCode) {
         await apiFetch(`/api/accessCodes/${accessCode.id}`, {
@@ -104,7 +108,7 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
       if (showToast) {
         showToast(err.message, 'error');
       } else {
-        alert(err.message);
+        setErrorMessage(err.message || 'Failed to save access code');
       }
     }
   };
@@ -112,6 +116,12 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
   if (isImporting) {
     return (
       <div className="space-y-6">
+        {errorMessage && (
+          <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium flex items-center gap-2">
+            <AlertCircle size={16} className="shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
         <div className="p-12 border-2 border-dashed border-[#E5E7EB] rounded-3xl text-center space-y-4">
           <div className="w-16 h-16 bg-[#F9FAFB] rounded-full flex items-center justify-center mx-auto">
             <FileText size={32} className="text-[#9CA3AF]" />
@@ -154,6 +164,12 @@ export function AccessCodeForm({ accessCode, locations, categories, onClose, onS
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {errorMessage && (
+        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium flex items-center gap-2">
+          <AlertCircle size={16} className="shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
       <div className="space-y-1.5">
         <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Location *</label>
         <select 

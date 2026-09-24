@@ -76,6 +76,7 @@ export function PrintExportModal({
   const [fitMode, setFitMode] = useState<FitMode>(defaultFitMode);
   const [customScale, setCustomScale] = useState<number>(defaultScale);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
 
   const contentRef = useRef<HTMLDivElement>(null);
   const [docDimensions, setDocDimensions] = useState({ scrollWidth: 800, scrollHeight: 600 });
@@ -457,23 +458,34 @@ export function PrintExportModal({
 
   const handleOpenInNewTab = () => {
     try {
-      const printWin = window.open('', '_blank');
-      if (printWin && !printWin.closed) {
-        printWin.document.write(getFullPrintHTML() + `
-          <script>
-            window.onload = function() {
-              setTimeout(function() {
-                window.focus();
-                window.print();
-              }, 400);
-            };
-          </script>
-        `);
-        printWin.document.close();
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+      const doc = iframe.contentWindow?.document;
+      if (doc) {
+        doc.open();
+        doc.write(getFullPrintHTML());
+        doc.close();
+        setTimeout(() => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch {
+            handleDownloadPDF();
+          } finally {
+            setTimeout(() => iframe.remove(), 1500);
+          }
+        }, 400);
       } else {
+        iframe.remove();
         handleDownloadPDF();
       }
-    } catch (e) {
+    } catch {
       handleDownloadPDF();
     }
   };
@@ -489,6 +501,7 @@ export function PrintExportModal({
   };
 
   const handleExportToExcel = () => {
+    setExportWarning(null);
     if (onExportExcel) {
       onExportExcel();
       return;
@@ -503,15 +516,23 @@ export function PrintExportModal({
           return;
         }
       }
-      alert('No tabular data found to export to Excel.');
-    } catch (err) {
+      setExportWarning('No tabular data found in this view to export to Excel.');
+      setTimeout(() => setExportWarning(null), 5000);
+    } catch (err: any) {
       console.error('Error exporting to Excel:', err);
+      setExportWarning(err.message || 'Error exporting to Excel');
     }
   };
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="5xl">
       <div className="space-y-4 font-sans text-slate-800">
+        {exportWarning && (
+          <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-xl font-medium flex items-center justify-between">
+            <span>{exportWarning}</span>
+            <button type="button" onClick={() => setExportWarning(null)} className="text-amber-600 hover:text-amber-900 font-bold ml-2">✕</button>
+          </div>
+        )}
         {/* TOP CONTROLS & FITTING DASHBOARD */}
         <div className="p-4 bg-slate-50 border border-slate-200/90 rounded-2xl space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">

@@ -18,8 +18,10 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
   const [data, setData] = useState<Partial<Location>>(location || { categoryId: categories[0]?.id });
   const [isImporting, setIsImporting] = useState(mode === 'import');
   const [importData, setImportData] = useState<any[] | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setErrorMessage(null);
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -36,7 +38,7 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
         setImportData(data);
       } catch (err) {
         console.error("Error parsing Excel:", err);
-        alert("Failed to parse Excel file.");
+        setErrorMessage("Failed to parse Excel file.");
       }
     };
     reader.readAsArrayBuffer(file);
@@ -45,6 +47,7 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
 
   const handleImport = async () => {
     if (!importData) return;
+    setErrorMessage(null);
     try {
       const res = await apiFetch('/api/locations/batch', {
         method: 'POST',
@@ -55,12 +58,13 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
         onClose();
       }
     } catch (err: any) {
-      alert(err.message);
+      setErrorMessage(err.message || 'Import failed');
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(null);
     try {
       if (location) {
         await apiFetch(`/api/locations/${location.id}`, {
@@ -76,13 +80,23 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
       await onSuccess();
       onClose();
     } catch (err: any) {
-      alert(err.message);
+      if (showToast) {
+        showToast(err.message, 'error');
+      } else {
+        setErrorMessage(err.message || 'Failed to save location');
+      }
     }
   };
 
   if (isImporting) {
     return (
       <div className="space-y-6">
+        {errorMessage && (
+          <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium flex items-center gap-2">
+            <AlertCircle size={16} className="shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
         <div className="p-12 border-2 border-dashed border-[#E5E7EB] rounded-3xl text-center space-y-4">
           <div className="w-16 h-16 bg-[#F9FAFB] rounded-full flex items-center justify-center mx-auto">
             <FileText size={32} className="text-[#9CA3AF]" />
@@ -125,6 +139,12 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {errorMessage && (
+        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium flex items-center gap-2">
+          <AlertCircle size={16} className="shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
       <div className="space-y-1.5">
         <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Category *</label>
         <select 

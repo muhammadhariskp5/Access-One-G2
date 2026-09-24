@@ -389,9 +389,27 @@ export function PlatformMasterControl({
   };
 
   // Export Full Platform Database Snapshot
-  const handleDownloadSnapshot = () => {
-    window.open('/api/platform/snapshot-export', '_blank');
-    showToast('Platform snapshot download initialized', 'success');
+  const handleDownloadSnapshot = async () => {
+    try {
+      showToast('Preparing platform database snapshot...', 'success');
+      const res = await apiFetch('/api/platform/snapshot-export');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to export platform snapshot');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `platform_snapshot_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Platform snapshot downloaded successfully', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Snapshot download failed', 'error');
+    }
   };
 
   // Filtered Companies

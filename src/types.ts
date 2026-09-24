@@ -454,3 +454,35 @@ export interface SuperAdminUserReport {
   workloadRanking: UserWorkloadMetric[];
   recentAuthEvents: AuditLog[];
 }
+
+export type NotificationType =
+  | 'application_new'
+  | 'application_status'
+  | 'application_approved'
+  | 'application_rejected'
+  | 'application_submitted'
+  | 'expiring_soon'
+  | 'expiring_48h'
+  | 'expiring_7d'
+  | 'expiring_30d'
+  | 'expired'
+  | 'pass_issued'
+  | 'security_alert'
+  | 'system_broadcast'
+  | 'account_status'
+  | 'general';
+
+export interface AppNotification {
+  id: string;
+  userId: string;
+  organizationId?: string | null;
+  type: NotificationType | string;
+  title: string;
+  message?: string;
+  entityType?: 'application' | 'pass' | 'personnel' | 'user' | 'system' | string | null;
+  entityId?: string | null;
+  link?: string | null;
+  priority?: 'normal' | 'high' | 'urgent';
+  isRead: boolean | number;
+  timestamp: string;
+}

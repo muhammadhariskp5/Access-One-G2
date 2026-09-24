@@ -82,8 +82,20 @@ async function startServer() {
       }
     }
 
-// --- In-App Notification Helper ---
-async function createNotification(connection: any, params: { userId: string; organizationId?: string | null; type: string; title: string; message?: string; entityType?: string; entityId?: string }) {
+// --- In-App Notification System Helpers ---
+interface NotificationParams {
+  userId: string;
+  organizationId?: string | null;
+  type: string;
+  title: string;
+  message?: string;
+  entityType?: string | null;
+  entityId?: string | null;
+  link?: string | null;
+  priority?: 'normal' | 'high' | 'urgent';
+}
+
+async function createNotification(connection: any, params: NotificationParams) {
   try {
     const notif = {
       id: Math.random().toString(36).substr(2, 9),
@@ -94,17 +106,198 @@ async function createNotification(connection: any, params: { userId: string; org
       message: params.message || '',
       entityType: params.entityType || null,
       entityId: params.entityId || null,
+      link: params.link || null,
+      priority: params.priority || 'normal',
       timestamp: new Date().toISOString(),
     };
-    await connection.execute(
-      `INSERT INTO notifications (id, userId, organizationId, type, title, message, entityType, entityId, isRead, "TIMESTAMP")
-       VALUES (:id, :userId, :organizationId, :type, :title, :message, :entityType, :entityId, 0, :timestamp)`,
-      notif
-    );
+    try {
+      await connection.execute(
+        `INSERT INTO notifications (id, userId, organizationId, type, title, message, entityType, entityId, link, priority, isRead, "TIMESTAMP")
+         VALUES (:id, :userId, :organizationId, :type, :title, :message, :entityType, :entityId, :link, :priority, 0, :timestamp)`,
+        notif
+      );
+    } catch (colErr: any) {
+      // Fallback if link or priority column not yet present
+      await connection.execute(
+        `INSERT INTO notifications (id, userId, organizationId, type, title, message, entityType, entityId, isRead, "TIMESTAMP")
+         VALUES (:id, :userId, :organizationId, :type, :title, :message, :entityType, :entityId, 0, :timestamp)`,
+        {
+          id: notif.id,
+          userId: notif.userId,
+          organizationId: notif.organizationId,
+          type: notif.type,
+          title: notif.title,
+          message: notif.message,
+          entityType: notif.entityType,
+          entityId: notif.entityId,
+          timestamp: notif.timestamp
+        }
+      );
+    }
     await connection.commit();
+    return notif;
   } catch (err) {
     console.error('Failed to create notification:', err);
+    return null;
   }
+}
+
+async function notifyAdmins(connection: any, orgId: string | null | undefined, params: Omit<NotificationParams, 'userId'> & { excludeUserId?: string }) {
+  try {
+    let sql = `SELECT id FROM users WHERE role IN ('admin', 'power_admin', 'approver') AND (status = 'active' OR status IS NULL)`;
+    const binds: any = {};
+    if (orgId) {
+      sql += ` AND (organizationId = :orgId OR role = 'power_admin')`;
+      binds.orgId = orgId;
+    }
+    if (params.excludeUserId) {
+      sql += ` AND id != :excludeUserId`;
+      binds.excludeUserId = params.excludeUserId;
+    }
+    const result = await connection.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+    const users = (result.rows || []) as any[];
+    for (const u of users) {
+      const uId = u.ID || u.id;
+      if (uId) {
+        await createNotification(connection, {
+          ...params,
+          userId: uId,
+          organizationId: orgId
+        });
+      }
+    }
+  } catch (err) {
+    console.error('Failed to notify admins:', err);
+  }
+}
+
+async function scanPassExpiries(connection: any): Promise<number> {
+  let createdCount = 0;
+  const now = new Date();
+  const nowStr = now.toISOString();
+  const twoDaysLater = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString();
+  const sevenDaysLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const thirtyDaysLater = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    // 1. Expired passes (expiryDate < now, status was 'active')
+    const expiredRes = await connection.execute(
+      `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
+       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL AND p.expiryDate < :nowStr
+       AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expired')`,
+      { nowStr },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const pass of (expiredRes.rows || []) as any[]) {
+      const pId = pass.ID || pass.id;
+      const pNum = pass.PASSNUMBER || pass.passNumber || pId;
+      const orgId = pass.ORGANIZATIONID || pass.organizationId;
+      const expDate = (pass.EXPIRYDATE || pass.expiryDate || '').split('T')[0];
+
+      // Mark pass expired in DB
+      await connection.execute(
+        `UPDATE passes SET status = 'expired', updatedAt = :nowStr WHERE id = :pId`,
+        { nowStr, pId }
+      );
+
+      await notifyAdmins(connection, orgId, {
+        type: 'expired',
+        title: `Pass Expired: ${pNum}`,
+        message: `Pass #${pNum} expired on ${expDate}. Status has been updated to expired.`,
+        entityType: 'pass',
+        entityId: pId,
+        link: '/status-management',
+        priority: 'urgent'
+      });
+      createdCount++;
+    }
+
+    // 2. Passes expiring in 48 hours
+    const urgent48Res = await connection.execute(
+      `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
+       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
+       AND p.expiryDate <= :twoDaysLater AND p.expiryDate >= :nowStr
+       AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_48h')`,
+      { twoDaysLater, nowStr },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const pass of (urgent48Res.rows || []) as any[]) {
+      const pId = pass.ID || pass.id;
+      const pNum = pass.PASSNUMBER || pass.passNumber || pId;
+      const orgId = pass.ORGANIZATIONID || pass.organizationId;
+      const expDate = (pass.EXPIRYDATE || pass.expiryDate || '').split('T')[0];
+
+      await notifyAdmins(connection, orgId, {
+        type: 'expiring_48h',
+        title: `Urgent: Pass Expiring in 48h (${pNum})`,
+        message: `Pass #${pNum} expires on ${expDate} (within 48 hours). Please initiate renewal or access review.`,
+        entityType: 'pass',
+        entityId: pId,
+        link: '/status-management',
+        priority: 'urgent'
+      });
+      createdCount++;
+    }
+
+    // 3. Passes expiring in 7 days
+    const warn7Res = await connection.execute(
+      `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
+       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
+       AND p.expiryDate <= :sevenDaysLater AND p.expiryDate > :twoDaysLater
+       AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_7d')`,
+      { sevenDaysLater, twoDaysLater },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const pass of (warn7Res.rows || []) as any[]) {
+      const pId = pass.ID || pass.id;
+      const pNum = pass.PASSNUMBER || pass.passNumber || pId;
+      const orgId = pass.ORGANIZATIONID || pass.organizationId;
+      const expDate = (pass.EXPIRYDATE || pass.expiryDate || '').split('T')[0];
+
+      await notifyAdmins(connection, orgId, {
+        type: 'expiring_7d',
+        title: `Warning: Pass Expiring in 7 Days (${pNum})`,
+        message: `Pass #${pNum} expires on ${expDate}. Renewal submission recommended.`,
+        entityType: 'pass',
+        entityId: pId,
+        link: '/status-management',
+        priority: 'high'
+      });
+      createdCount++;
+    }
+
+    // 4. Passes expiring in 30 days
+    const notice30Res = await connection.execute(
+      `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
+       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
+       AND p.expiryDate <= :thirtyDaysLater AND p.expiryDate > :sevenDaysLater
+       AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_30d')`,
+      { thirtyDaysLater, sevenDaysLater },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const pass of (notice30Res.rows || []) as any[]) {
+      const pId = pass.ID || pass.id;
+      const pNum = pass.PASSNUMBER || pass.passNumber || pId;
+      const orgId = pass.ORGANIZATIONID || pass.organizationId;
+      const expDate = (pass.EXPIRYDATE || pass.expiryDate || '').split('T')[0];
+
+      await notifyAdmins(connection, orgId, {
+        type: 'expiring_30d',
+        title: `Notice: Pass Expiring in 30 Days (${pNum})`,
+        message: `Pass #${pNum} expires on ${expDate}. Access pass will require extension or renewal.`,
+        entityType: 'pass',
+        entityId: pId,
+        link: '/status-management',
+        priority: 'normal'
+      });
+      createdCount++;
+    }
+
+    await connection.commit();
+  } catch (scanErr) {
+    console.error('Failed in scanPassExpiries:', scanErr);
+  }
+  return createdCount;
 }
 
     // --- Real-time User Presence In-Memory Registry ---
@@ -601,7 +794,19 @@ function verifySessionToken(token) {
     const app = express();
     const PORT = 3000;
 
-    app.use(express.json());
+    // Security Hardening: Disable x-powered-by banner
+    app.disable('x-powered-by');
+
+    // Standard HTTP Security Headers (compatible with iFrame embedding)
+    app.use((_req, res, next) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+      res.setHeader('X-XSS-Protection', '0');
+      next();
+    });
+
+    app.use(express.json({ limit: '20mb' }));
+    app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
     // Request logging middleware
     app.use((req, res, next) => {
@@ -2130,6 +2335,38 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
       await connection.commit();
       
+      // Dispatch in-app notifications to admins/approvers and requester
+      try {
+        const callerName = (req.headers['x-user-name'] as string) || 'Applicant';
+        const requesterId = filteredBody.requesterId;
+        await notifyAdmins(connection, effectiveOrgId, {
+          type: 'application_new',
+          title: `New Application Submitted: #${requestId}`,
+          message: `${callerName} submitted pass application #${requestId} for ${employeeIds.length} personnel.`,
+          entityType: 'application',
+          entityId: requestId,
+          link: `/applications/${requestId}`,
+          priority: 'normal',
+          excludeUserId: requesterId
+        });
+
+        if (requesterId && requesterId !== 'system') {
+          await createNotification(connection, {
+            userId: requesterId,
+            organizationId: effectiveOrgId,
+            type: 'application_submitted',
+            title: `Application Submitted: #${requestId}`,
+            message: `Your pass application #${requestId} has been submitted for review.`,
+            entityType: 'application',
+            entityId: requestId,
+            link: `/applications/${requestId}`,
+            priority: 'normal'
+          });
+        }
+      } catch (notifErr) {
+        console.error('Failed to dispatch application notifications:', notifErr);
+      }
+
       logAction(req, 'CREATE', 'application', requestId, `Created pass application for ${employeeIds.length} employees`);
       res.json({
         ...newRequest,
@@ -2519,14 +2756,39 @@ app.post("/api/auth/reset-password", async (req, res) => {
       await connection.commit();
       const notifyUserId = application.REQUESTERID || application.requesterId;
       if (notifyUserId && notifyUserId !== 'system') {
+        const normSt = (status || '').toLowerCase();
+        let notifType = 'application_status';
+        let notifTitle = `Application Status Update: #${req.params.id}`;
+        let notifMessage = `Your pass application status changed to: ${status}`;
+        let notifPriority: 'normal' | 'high' | 'urgent' = 'normal';
+
+        if (normSt === 'approved') {
+          notifType = 'application_approved';
+          notifTitle = `Application Approved: #${req.params.id}`;
+          notifMessage = `Congratulations! Your pass application #${req.params.id} has been approved.`;
+          notifPriority = 'high';
+        } else if (normSt === 'rejected') {
+          notifType = 'application_rejected';
+          notifTitle = `Application Rejected: #${req.params.id}`;
+          notifMessage = `Pass application #${req.params.id} was rejected${remarks ? ': ' + remarks : '.'}`;
+          notifPriority = 'urgent';
+        } else if (normSt === 'completed' || normSt === 'collected') {
+          notifType = 'pass_issued';
+          notifTitle = `Passes Ready / Issued: #${req.params.id}`;
+          notifMessage = `Passes for application #${req.params.id} are ready/issued.`;
+          notifPriority = 'high';
+        }
+
         await createNotification(connection, {
           userId: notifyUserId,
           organizationId: application.ORGANIZATIONID || application.organizationId || null,
-          type: 'application_status',
-          title: `Application ${req.params.id} status updated`,
-          message: `Your pass application is now: ${status}`,
+          type: notifType,
+          title: notifTitle,
+          message: notifMessage,
           entityType: 'application',
           entityId: req.params.id,
+          link: `/applications/${req.params.id}`,
+          priority: notifPriority,
         });
       }
       logAction(req, 'STATUS_CHANGE', 'application', req.params.id, `Changed status to ${status}`);
@@ -2821,6 +3083,27 @@ app.post("/api/auth/reset-password", async (req, res) => {
       }
 
       await connection.commit();
+
+      // Dispatch in-app notification to requester
+      try {
+        const notifyUserId = application.REQUESTERID || application.requesterId;
+        if (notifyUserId && notifyUserId !== 'system') {
+          const isTerminal = status === 'completed' || status === 'collected';
+          await createNotification(connection, {
+            userId: notifyUserId,
+            organizationId: application.ORGANIZATIONID || application.organizationId || null,
+            type: isTerminal ? 'pass_issued' : 'application_status',
+            title: `Passes Update: #${req.params.id}`,
+            message: `${employeeIds.length} personnel pass status updated to "${status}".`,
+            entityType: 'application',
+            entityId: req.params.id,
+            link: `/applications/${req.params.id}`,
+            priority: isTerminal ? 'high' : 'normal'
+          });
+        }
+      } catch (notifErr) {
+        console.error('Failed to notify on member status update:', notifErr);
+      }
 
       logAction(req, 'MEMBER_STATUS_CHANGE', 'application', req.params.id, `Updated ${employeeIds.length} members status to ${status}`);
       res.json({ success: true, employeeStatuses, status: newStatus });
@@ -4670,12 +4953,40 @@ app.post("/api/auth/reset-password", async (req, res) => {
 // --- In-App Notifications Endpoints ---
 app.get("/api/notifications", authorize([]), async (req, res) => {
   const userId = req.headers['x-user-id'] as string;
+  const limit = Math.min(parseInt(req.query.limit as string) || 100, 200);
+  const unreadOnly = req.query.unreadOnly === 'true' || req.query.unreadOnly === '1';
+  const typeFilter = (req.query.type as string)?.trim();
+
   let connection;
   try {
     connection = await getConnection();
+    let query = `SELECT * FROM notifications WHERE userId = :userId`;
+    const binds: any = { userId };
+
+    if (unreadOnly) {
+      query += ` AND isRead = 0`;
+    }
+    if (typeFilter && typeFilter !== 'all') {
+      if (typeFilter === 'expiries') {
+        query += ` AND type IN ('expiring_soon', 'expiring_48h', 'expiring_7d', 'expiring_30d', 'expired')`;
+      } else if (typeFilter === 'applications') {
+        query += ` AND (type LIKE 'application%' OR entityType = 'application')`;
+      } else if (typeFilter === 'passes') {
+        query += ` AND (type LIKE 'pass%' OR type IN ('expiring_soon', 'expiring_48h', 'expiring_7d', 'expiring_30d', 'expired') OR entityType = 'pass')`;
+      } else if (typeFilter === 'broadcast') {
+        query += ` AND type IN ('system_broadcast', 'broadcast', 'security_alert')`;
+      } else {
+        query += ` AND type = :typeFilter`;
+        binds.typeFilter = typeFilter;
+      }
+    }
+
+    query += ` ORDER BY "TIMESTAMP" DESC FETCH FIRST :limit ROWS ONLY`;
+    binds.limit = limit;
+
     const result = await connection.execute(
-      `SELECT * FROM notifications WHERE userId = :userId ORDER BY "TIMESTAMP" DESC FETCH FIRST 50 ROWS ONLY`,
-      [userId],
+      query,
+      binds,
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     res.json((result.rows || []).map(toCamelCase));
@@ -4720,6 +5031,144 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
   } catch (err) {
     console.error('Failed to mark notification read:', err);
     res.status(500).json({ error: 'Failed to update notification' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+app.delete("/api/notifications/:id", authorize([]), async (req, res) => {
+  const userId = req.headers['x-user-id'] as string;
+  let connection;
+  try {
+    connection = await getConnection();
+    await connection.execute(
+      `DELETE FROM notifications WHERE id = :id AND userId = :userId`,
+      { id: req.params.id, userId }
+    );
+    await connection.commit();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Failed to delete notification:', err);
+    res.status(500).json({ error: 'Failed to delete notification' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+app.delete("/api/notifications", authorize([]), async (req, res) => {
+  const userId = req.headers['x-user-id'] as string;
+  const deleteAll = req.query.all === 'true';
+  let connection;
+  try {
+    connection = await getConnection();
+    if (deleteAll) {
+      await connection.execute(
+        `DELETE FROM notifications WHERE userId = :userId`,
+        { userId }
+      );
+    } else {
+      await connection.execute(
+        `DELETE FROM notifications WHERE userId = :userId AND isRead = 1`,
+        { userId }
+      );
+    }
+    await connection.commit();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Failed to clear notifications:', err);
+    res.status(500).json({ error: 'Failed to clear notifications' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+app.post("/api/notifications/broadcast", authorize(['admin', 'power_admin']), async (req, res) => {
+  const { title, message, priority, targetRole, organizationId } = req.body;
+  if (!title || !message) {
+    return res.status(400).json({ error: 'Title and message are required' });
+  }
+
+  let connection;
+  try {
+    connection = await getConnection();
+    const { orgId, isPowerAdmin } = await getTenantOrgId(req, connection);
+    const targetOrgId = isPowerAdmin ? (organizationId || null) : orgId;
+
+    let userSql = `SELECT id, organizationId FROM users WHERE status = 'active'`;
+    const binds: any = {};
+    if (targetOrgId) {
+      userSql += ` AND (organizationId = :targetOrgId OR role = 'power_admin')`;
+      binds.targetOrgId = targetOrgId;
+    }
+    if (targetRole && targetRole !== 'all') {
+      userSql += ` AND role = :targetRole`;
+      binds.targetRole = targetRole;
+    }
+
+    const usersResult = await connection.execute(userSql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+    const targetUsers = (usersResult.rows || []) as any[];
+
+    let sentCount = 0;
+    for (const u of targetUsers) {
+      const uId = u.ID || u.id;
+      if (uId) {
+        await createNotification(connection, {
+          userId: uId,
+          organizationId: u.ORGANIZATIONID || u.organizationId || targetOrgId,
+          type: 'system_broadcast',
+          title: title.trim(),
+          message: message.trim(),
+          entityType: 'system',
+          priority: priority || 'high',
+          link: '/notifications'
+        });
+        sentCount++;
+      }
+    }
+
+    res.json({ success: true, count: sentCount });
+  } catch (err) {
+    console.error('Failed to send broadcast notification:', err);
+    res.status(500).json({ error: 'Failed to send broadcast notification' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+app.post("/api/notifications/check-expiries", authorize(['admin', 'power_admin', 'approver', 'applier']), async (req, res) => {
+  let connection;
+  try {
+    connection = await getConnection();
+    const count = await scanPassExpiries(connection);
+    res.json({ success: true, count });
+  } catch (err) {
+    console.error('Failed to scan pass expiries:', err);
+    res.status(500).json({ error: 'Failed to scan pass expiries' });
+  } finally {
+    if (connection) await connection.close();
+  }
+});
+
+app.post("/api/notifications/test", authorize([]), async (req, res) => {
+  const userId = req.headers['x-user-id'] as string;
+  let connection;
+  try {
+    connection = await getConnection();
+    const { orgId } = await getTenantOrgId(req, connection);
+    const notif = await createNotification(connection, {
+      userId,
+      organizationId: orgId,
+      type: 'general',
+      title: 'In-App Notification Test',
+      message: 'The in-app notification system is active, fully connected, and working in real time.',
+      entityType: 'system',
+      link: '/notifications',
+      priority: 'normal'
+    });
+    res.json({ success: true, notification: notif });
+  } catch (err) {
+    console.error('Failed to send test notification:', err);
+    res.status(500).json({ error: 'Failed to send test notification' });
   } finally {
     if (connection) await connection.close();
   }
@@ -6349,38 +6798,11 @@ app.patch("/api/notifications/:id/read", authorize([]), async (req, res) => {
         { now, ninetyDaysAgo }
       );
       
-      // Notify org admins about passes expiring within 48 hours (once per pass)
+      // Scan passes for 30-day, 7-day, 48-hour expirations and expired passes
       try {
-        const soonThreshold = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
-        const expiringResult = await connection.execute(
-          `SELECT p.id, p.organizationId FROM passes p
-           WHERE p.status = 'active' AND p.expiryDate IS NOT NULL AND p.expiryDate <= :threshold AND p.expiryDate > :nowStr
-           AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_soon')`,
-          { threshold: soonThreshold, nowStr: now },
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        for (const pass of (expiringResult.rows || []) as any[]) {
-          const orgId = pass.ORGANIZATIONID || pass.organizationId;
-          if (!orgId) continue;
-          const adminsResult = await connection.execute(
-            `SELECT id FROM users WHERE organizationId = :orgId AND role IN ('admin','power_admin')`,
-            { orgId },
-            { outFormat: oracledb.OUT_FORMAT_OBJECT }
-          );
-          for (const admin of (adminsResult.rows || []) as any[]) {
-            await createNotification(connection, {
-              userId: admin.ID || admin.id,
-              organizationId: orgId,
-              type: 'expiring_soon',
-              title: 'Pass expiring soon',
-              message: `Pass ${pass.ID || pass.id} is expiring within 48 hours.`,
-              entityType: 'pass',
-              entityId: pass.ID || pass.id,
-            });
-          }
-        }
+        await scanPassExpiries(connection);
       } catch (notifErr) {
-        console.error('Failed to send pass-expiring notifications:', notifErr);
+        console.error('Failed to run scanPassExpiries in checkExpirations:', notifErr);
       }
 
       await connection.commit();

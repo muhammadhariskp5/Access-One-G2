@@ -23,6 +23,7 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [generalError, setGeneralError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const validateField = (name: string, value: string) => {
@@ -71,13 +72,14 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setGeneralError(null);
     if (Object.keys(errors).length > 0) {
-      alert("Please fix the errors before saving.");
+      setGeneralError("Please fix the highlighted validation errors before saving.");
       return;
     }
 
     if (!data.qidVisaNumber && !data.qatarId && !data.visaNumber) {
-      alert("Please provide a QID or Visa Number.");
+      setGeneralError("Please provide a QID or Visa Number.");
       return;
     }
 
@@ -115,7 +117,7 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
       onSuccess(savedEmp);
       onClose();
     } catch (err: any) {
-      alert(err.message || "Failed to save employee");
+      setGeneralError(err.message || "Failed to save employee");
     } finally {
       setIsSubmitting(false);
     }
@@ -123,6 +125,11 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6 max-h-[70vh] overflow-y-auto px-1 pr-2">
+      {generalError && (
+        <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl font-medium">
+          {generalError}
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">First Name *</label>

@@ -43,6 +43,9 @@ import { EmployeeDetail } from './pages/EmployeeDetail';
 import { ApplicationDetail } from './pages/ApplicationDetail';
 import { SaaSAdminPortal } from './pages/SaaSAdminPortal';
 import { MaintenanceBanner } from './components/layout/MaintenanceBanner';
+import { NotificationsPage } from './pages/Notifications';
+import { NotificationProvider } from './context/NotificationContext';
+import { InAppNotificationToast } from './components/notifications/InAppNotificationToast';
 
 // --- Forms ---
 import { ResetPasswordForm } from './components/settings/ResetPasswordForm';
@@ -702,8 +705,10 @@ export default function App() {
   }
 
   return (
-    <div key={`tenant-user-${user.id}-${user.organizationId || 'global'}`} className="min-h-screen bg-[#F8F9FA] flex flex-col">
-      <MaintenanceBanner company={company} />
+    <NotificationProvider currentUser={user}>
+      <div key={`tenant-user-${user.id}-${user.organizationId || 'global'}`} className="min-h-screen bg-[#F8F9FA] flex flex-col">
+        <InAppNotificationToast />
+        <MaintenanceBanner company={company} />
       <div className="flex-1 flex">
         {/* Connectivity Alert */}
       {!isOnline && (
@@ -908,6 +913,7 @@ export default function App() {
                   <Navigate to="/" replace />
                 )
               } />
+              <Route path="/notifications" element={<NotificationsPage currentUser={user} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>
@@ -968,5 +974,6 @@ export default function App() {
         />
       )}
     </div>
+    </NotificationProvider>
   );
 }

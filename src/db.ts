@@ -551,6 +551,8 @@ export async function initializeDatabase() {
         message VARCHAR2(1000),
         entityType VARCHAR2(50),
         entityId VARCHAR2(50),
+        link VARCHAR2(255),
+        priority VARCHAR2(50) DEFAULT 'normal',
         isRead NUMBER(1) DEFAULT 0,
         "TIMESTAMP" VARCHAR2(50)
       )`    ];
@@ -874,6 +876,19 @@ export async function initializeDatabase() {
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE organizations ADD (${col.name} ${col.type})`);
                 console.log(`Added ${col.name} column to organizations table.`);
+              }
+            }
+          } else if (tableName.toLowerCase() === 'notifications') {
+            const notifColumns = [
+              { name: 'LINK', type: 'VARCHAR2(255)' },
+              { name: 'PRIORITY', type: "VARCHAR2(50) DEFAULT 'normal'" }
+            ];
+            for (const col of notifColumns) {
+              const colCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'NOTIFICATIONS' AND column_name = '${col.name}'`;
+              const colResult = await connection.execute(colCheckSql);
+              if (colResult.rows && colResult.rows.length === 0) {
+                await connection.execute(`ALTER TABLE notifications ADD (${col.name} ${col.type})`);
+                console.log(`Added ${col.name} column to notifications table.`);
               }
             }
           }
