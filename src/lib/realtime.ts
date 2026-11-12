@@ -7,6 +7,7 @@ type ChangeListener = (resources: string[]) => void;
 type StatusListener = (connected: boolean) => void;
 
 const changeListeners = new Set<ChangeListener>();
+const versionListeners = new Set<(version: string) => void>();
 const statusListeners = new Set<StatusListener>();
 
 let controller: AbortController | null = null;
@@ -66,6 +67,7 @@ async function connect() {
         try {
           const msg = JSON.parse(data);
           if (Array.isArray(msg?.resources) && msg.resources.length > 0) emit(msg.resources);
+          if (typeof msg?.version === 'string' && msg.version) versionListeners.forEach(fn => fn(msg.version));
         } catch { /* ignore malformed */ }
       }
     }
@@ -105,6 +107,12 @@ export function onDataChanged(fn: ChangeListener): () => void {
 export function onRealtimeStatus(fn: StatusListener): () => void {
   statusListeners.add(fn);
   return () => { statusListeners.delete(fn); };
+}
+
+// Fires with the server's deployed web-app version each time the live connection (re)opens.
+export function onServerVersion(fn: (version: string) => void): () => void {
+  versionListeners.add(fn);
+  return () => { versionListeners.delete(fn); };
 }
 
 export function isRealtimeConnected() {

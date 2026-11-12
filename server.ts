@@ -803,6 +803,11 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       next();
     });
     const PORT = Number(process.env.PORT) || 3000;
+    // Version of the built web app being served (written by the Vite build); empty in development.
+    let DEPLOYED_VERSION = '';
+    try {
+      DEPLOYED_VERSION = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'dist', 'version.json'), 'utf8')).version || '';
+    } catch { /* development / no build */ }
 
     // Security Hardening: Disable x-powered-by banner
     app.disable('x-powered-by');
@@ -910,7 +915,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       let connection;
       try {
         connection = await getConnection();
-        res.json({ status: "ok", dbConnected: true, engine: getDbEngine(), ready: startupComplete });
+        res.json({ status: "ok", dbConnected: true, engine: getDbEngine(), ready: startupComplete, version: DEPLOYED_VERSION || undefined });
       } catch (err: any) {
         logger.error('Health check DB error', { err: err });
         let error = "Database connection failed";
@@ -934,6 +939,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       res.setHeader('X-Accel-Buffering', 'no'); // stop nginx buffering the stream
       res.flushHeaders();
       res.write('retry: 5000\n\n');
+      if (DEPLOYED_VERSION) res.write(`data: ${JSON.stringify({ version: DEPLOYED_VERSION })}\n\n`);
 
       const role = String(req.headers['x-user-role'] || '');
       const email = String(req.headers['x-user-email'] || '');

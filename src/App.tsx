@@ -23,7 +23,7 @@ import {
   isPowerAdmin
 } from './types';
 import { apiFetch, cn } from './lib/utils';
-import { startRealtime, stopRealtime, onDataChanged, isRealtimeConnected } from './lib/realtime';
+import { startRealtime, stopRealtime, onDataChanged, isRealtimeConnected, onServerVersion } from './lib/realtime';
 
 // --- Components ---
 import { Modal } from './components/common/Modal';
@@ -322,6 +322,13 @@ export default function App() {
       console.error("Failed to fetch audit logs:", err);
     }
   };
+
+  // New-version notice: the server announces its deployed build; if this tab runs an older one,
+  // offer a reload (not automatic, so nobody loses a half-filled form).
+  const [newVersionAvailable, setNewVersionAvailable] = useState(false);
+  useEffect(() => onServerVersion(version => {
+    if (version && version !== __APP_VERSION__) setNewVersionAvailable(true);
+  }), []);
 
   // Latest fetchData for long-lived listeners below (avoids stale closures)
   const fetchDataRef = useRef(fetchData);
@@ -1029,6 +1036,22 @@ export default function App() {
           onClose={() => setToast(null)} 
           onRetry={toast.onRetry}
         />
+      )}
+
+      {newVersionAvailable && (
+        <div role="status" className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[100] max-w-[calc(100%-2rem)] flex items-center gap-3 rounded-xl bg-[#1A1A1A] text-white px-4 py-3 shadow-lg text-xs">
+          <span>A new version of AccessOne is available.</span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="rounded-lg bg-[#800020] hover:bg-[#66001a] px-3 py-1.5 font-semibold cursor-pointer"
+          >
+            Reload
+          </button>
+          <button type="button" onClick={() => setNewVersionAvailable(false)} className="text-white/60 hover:text-white cursor-pointer" aria-label="Dismiss">
+            Later
+          </button>
+        </div>
       )}
     </div>
     </NotificationProvider>

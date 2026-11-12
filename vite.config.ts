@@ -22,9 +22,24 @@ function html2canvasPatchPlugin() {
   };
 }
 
+// Each production build gets a unique version. The client embeds it (__APP_VERSION__) and the
+// server reads dist/version.json, so open tabs can tell when a newer build has been deployed.
+const BUILD_VERSION = new Date().toISOString();
+function buildVersionPlugin() {
+  return {
+    name: 'build-version',
+    generateBundle(this: any) {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ version: BUILD_VERSION }) });
+    }
+  };
+}
+
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss(), html2canvasPatchPlugin()],
+    plugins: [react(), tailwindcss(), html2canvasPatchPlugin(), buildVersionPlugin()],
+    define: {
+      __APP_VERSION__: JSON.stringify(BUILD_VERSION),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
