@@ -55,7 +55,7 @@ export const schemas = {
     displayName: trimmed(100).min(1).optional(),
     photoURL: z.union([trimmed(1000), z.null()]).optional(),
     phone: optionalText(50),
-    preferences: z.union([z.record(z.any()), z.string().max(20000)]).optional(),
+    preferences: z.union([z.record(z.string(), z.any()), z.string().max(20000)]).optional(),
     role: role.optional(),
     status: z.enum(['pending', 'active', 'inactive', 'suspended']).optional(),
     jobTitle: optionalText(), department: optionalText(), division: optionalText(), project: optionalText(),
