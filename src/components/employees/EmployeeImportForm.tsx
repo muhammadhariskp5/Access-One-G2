@@ -474,7 +474,7 @@ export function EmployeeImportForm({ employees, divisions, departments, projects
 
           {importResults.duplicates && importResults.duplicates.length > 0 && (
             <div className="space-y-2">
-              <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Skipped Records (Already Exist)</p>
+              <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Skipped Records (already exist or invalid data)</p>
               <div className="max-h-40 overflow-y-auto p-3 bg-amber-50 rounded-xl border border-amber-100 space-y-1">
                 {importResults.duplicates.map((dup: string, i: number) => (
                   <p key={i} className="text-[9px] text-amber-700 flex items-center gap-2">
