@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import * as XLSX from 'xlsx';
 import { Location, Category } from '../../types';
 import { apiFetch } from '../../lib/utils';
 import { FileText, Upload, AlertCircle, Table } from 'lucide-react';
@@ -26,7 +25,9 @@ export function LocationForm({ location, categories, onClose, onSuccess, mode = 
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
+      // Spreadsheet parser is loaded only when a file is actually uploaded
+      const XLSX = await import('xlsx');
       try {
         const buffer = evt.target?.result as ArrayBuffer;
         if (!buffer) return;

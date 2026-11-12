@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { 
   ShieldCheck, 
@@ -33,18 +33,19 @@ import { Sidebar } from './components/layout/Sidebar';
 import { Navbar } from './components/layout/Navbar';
 
 // --- Pages ---
-import { Dashboard } from './pages/Dashboard';
-import { Employees } from './pages/Employees';
-import { Resources } from './pages/Resources';
-import { AccessMatrix } from './pages/AccessMatrix';
-import { Settings } from './pages/Settings';
-import { Passes } from './pages/Passes';
-import { AuditLogs } from './pages/AuditLogs';
-import { EmployeeDetail } from './pages/EmployeeDetail';
-import { ApplicationDetail } from './pages/ApplicationDetail';
-import { SaaSAdminPortal } from './pages/SaaSAdminPortal';
 import { MaintenanceBanner } from './components/layout/MaintenanceBanner';
-import { NotificationsPage } from './pages/Notifications';
+// Pages load on first visit (route-level code splitting) instead of all up front.
+const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
+const Employees = lazy(() => import('./pages/Employees').then(m => ({ default: m.Employees })));
+const Resources = lazy(() => import('./pages/Resources').then(m => ({ default: m.Resources })));
+const AccessMatrix = lazy(() => import('./pages/AccessMatrix').then(m => ({ default: m.AccessMatrix })));
+const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
+const Passes = lazy(() => import('./pages/Passes').then(m => ({ default: m.Passes })));
+const AuditLogs = lazy(() => import('./pages/AuditLogs').then(m => ({ default: m.AuditLogs })));
+const EmployeeDetail = lazy(() => import('./pages/EmployeeDetail').then(m => ({ default: m.EmployeeDetail })));
+const ApplicationDetail = lazy(() => import('./pages/ApplicationDetail').then(m => ({ default: m.ApplicationDetail })));
+const SaaSAdminPortal = lazy(() => import('./pages/SaaSAdminPortal').then(m => ({ default: m.SaaSAdminPortal })));
+const NotificationsPage = lazy(() => import('./pages/Notifications').then(m => ({ default: m.NotificationsPage })));
 import { NotificationProvider } from './context/NotificationContext';
 import { InAppNotificationToast } from './components/notifications/InAppNotificationToast';
 
@@ -802,6 +803,7 @@ export default function App() {
         <div className="p-4 flex-1 flex flex-col min-h-[calc(100vh-64px)]">
           <AnimatePresence mode="wait">
             <div className="flex-1 flex flex-col w-full min-h-[calc(100vh-96px)]">
+              <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-[#6B7280]">Loading…</div>}>
               <Routes>
               <Route path="/" element={
                 <Dashboard 
@@ -980,6 +982,7 @@ export default function App() {
               <Route path="/notifications" element={<NotificationsPage currentUser={user} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+              </Suspense>
           </div>
         </AnimatePresence>
       </div>

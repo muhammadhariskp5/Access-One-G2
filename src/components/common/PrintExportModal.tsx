@@ -17,9 +17,7 @@ import {
   RotateCw,
   FileCheck
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas-pro';
+// xlsx, jspdf and html2canvas (~600 KB) are loaded only when an export is actually requested.
 import { Modal } from './Modal';
 import { cn } from '../../lib/utils';
 
@@ -219,6 +217,16 @@ export function PrintExportModal({
     if (!contentRef.current) return;
     setIsGeneratingPDF(true);
     const cleanFilename = `${documentTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.pdf`;
+
+    let jsPDF: any;
+    let html2canvas: any;
+    try {
+      [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([import('jspdf'), import('html2canvas-pro')]);
+    } catch (loadErr) {
+      console.error('Could not load the PDF export module:', loadErr);
+      setIsGeneratingPDF(false);
+      return;
+    }
 
     try {
       const element = contentRef.current;
@@ -512,7 +520,7 @@ export function PrintExportModal({
     URL.revokeObjectURL(url);
   };
 
-  const handleExportToExcel = () => {
+  const handleExportToExcel = async () => {
     setExportWarning(null);
     if (onExportExcel) {
       onExportExcel();
@@ -523,6 +531,7 @@ export function PrintExportModal({
       if (contentRef.current) {
         const table = contentRef.current.querySelector('table');
         if (table) {
+          const XLSX = await import('xlsx');
           const wb = XLSX.utils.table_to_book(table, { raw: true });
           XLSX.writeFile(wb, `${documentTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.xlsx`);
           return;
