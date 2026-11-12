@@ -217,7 +217,7 @@ export function SuperAdminUserReports({
   const filteredPresences = useMemo(() => {
     if (!reportData?.onlineUsers) return [];
     return reportData.onlineUsers.filter(p => {
-      if (p.role === 'power_admin' || p.email?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+      if (p.role === 'power_admin') return false;
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch = !q || 
         p.displayName.toLowerCase().includes(q) || 
@@ -238,7 +238,7 @@ export function SuperAdminUserReports({
   const filteredWorkload = useMemo(() => {
     if (!reportData?.workloadRanking) return [];
     return reportData.workloadRanking.filter(w => {
-      if (w.role === 'power_admin' || w.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
+      if (w.role === 'power_admin') return false;
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch = !q || 
         w.userName.toLowerCase().includes(q) || 
@@ -265,7 +265,6 @@ export function SuperAdminUserReports({
     const isPower = currentUser?.role === 'power_admin';
     return reportData.recentAuthEvents.filter(ev => {
       if (!isPower) {
-        if (ev.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
         if (ev.userId === 'system' || (ev.userName?.toLowerCase() === 'system' && !ev.organizationId)) return false;
         if (currentUser?.organizationId && ev.organizationId && ev.organizationId !== currentUser.organizationId) return false;
       }

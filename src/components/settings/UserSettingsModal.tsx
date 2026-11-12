@@ -174,15 +174,21 @@ export function UserSettingsModal({
   const handleResetPassword = () => {
     showConfirm(
       'Reset User Password',
-      `Reset password for ${user.displayName || user.email}? The temporary password will be set to 'password123'.`,
+      `Reset password for ${user.displayName || user.email}? A random temporary password will be generated and shown once.`,
       async () => {
         try {
-          const res = await apiFetch(`/api/users/${user.id}/reset-password`, {
-            method: 'POST',
-            body: JSON.stringify({ newPassword: 'password123' })
-          });
+          const res = await apiFetch(`/api/users/${user.id}/reset-password`, { method: 'POST' });
           if (res.ok) {
-            showToast("Password reset to 'password123'", 'success');
+            const data = await res.json();
+            if (data.temporaryPassword) {
+              try { await navigator.clipboard.writeText(data.temporaryPassword); } catch { /* clipboard unavailable */ }
+              window.alert(`Temporary password (copied to clipboard):
+
+${data.temporaryPassword}
+
+Share it securely; it will not be shown again.`);
+            }
+            showToast('Password reset successfully', 'success');
           }
         } catch (err: any) {
           showToast(err.message, 'error');
@@ -197,8 +203,8 @@ export function UserSettingsModal({
       showToast('Please enter a new password', 'error');
       return;
     }
-    if (customPassword.length < 6) {
-      showToast('Password must be at least 6 characters long', 'error');
+    if (customPassword.length < 8) {
+      showToast('Password must be at least 8 characters long', 'error');
       return;
     }
 
@@ -222,7 +228,7 @@ export function UserSettingsModal({
     }
   };
 
-  const isTargetPowerAdmin = user.role === 'power_admin' || user.email?.toLowerCase() === 'm.techsandgadgets@gmail.com';
+  const isTargetPowerAdmin = user.role === 'power_admin';
 
   const handleDeleteUser = async () => {
     if (isTargetPowerAdmin) {
@@ -844,7 +850,7 @@ export function UserSettingsModal({
                   <div>
                     <h5 className="text-xs font-bold text-slate-900">Reset User Password to Default</h5>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      Quickly resets password to system default (<code className="bg-slate-200 px-1 py-0.5 rounded text-[10px] font-mono">password123</code>).
+                      Generates a random temporary password and shows it once.
                     </p>
                   </div>
                   <button

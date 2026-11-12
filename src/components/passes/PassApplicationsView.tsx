@@ -190,7 +190,7 @@ export function PassApplicationsView({
 
   const isArchivedApp = (app: PassApplication) => {
     const s = (app.status || '').toLowerCase();
-    if (s === 'archived' || s === 'completed' || s === 'rejected' || s === 'cancelled') {
+    if (['archived', 'completed', 'rejected', 'cancelled', 'expired', 'replaced'].includes(s)) {
       return true;
     }
     // Also check if all members are cancelled or completed
@@ -202,13 +202,15 @@ export function PassApplicationsView({
     });
     const stats = calculateApplicationStats(app.employeeIds, app.employeeStatuses || {}, passesForApp);
     const computed = computeApplicationRollupStatus(app.status, stats);
-    return computed === 'archived' || computed === 'completed' || computed === 'rejected' || computed === 'cancelled';
+    return ['archived', 'completed', 'rejected', 'cancelled', 'expired', 'replaced'].includes(computed);
   };
 
   const activeApps = useMemo(() => filteredApps.filter(a => !isArchivedApp(a)), [filteredApps, passes]);
   const archivedApps = useMemo(() => filteredApps.filter(a => isArchivedApp(a)), [filteredApps, passes]);
 
-  const displayedApps = activeTab === 'active' ? activeApps : archivedApps;
+  // History is retained in full but only listed on a specific search (name, QID, emp code, app/pass no.)
+  const historySearchActive = globalSearch.trim().length >= 2;
+  const displayedApps = activeTab === 'active' ? activeApps : (historySearchActive ? archivedApps : []);
 
   const handleExportExcel = () => {
     const workbook = XLSX.utils.book_new();
@@ -828,7 +830,16 @@ export function PassApplicationsView({
         {displayedApps.length === 0 && (
           <div className="py-16 text-center bg-white rounded-2xl border border-dashed border-gray-200">
             <FileText size={32} className="mx-auto mb-3 text-gray-300" />
-            <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">No applications found in queue</p>
+            {activeTab === 'archived' && !historySearchActive ? (
+              <>
+                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">History is search-only</p>
+                <p className="text-[11px] text-gray-400 mt-1">
+                  {archivedApps.length} closed / expired applications are retained. Search by name, QID, employee code or application number to view them.
+                </p>
+              </>
+            ) : (
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">No applications found in queue</p>
+            )}
           </div>
         )}
       </div>

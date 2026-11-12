@@ -3,7 +3,9 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import initSqlJs from 'sql.js';
+import { logger } from './server/log.ts';
 
 dotenv.config();
 
@@ -13,15 +15,20 @@ export function getDbEngine() {
 }
 
 let sqliteDbInstance: any = null;
-const sqliteDbPath = path.join(process.cwd(), 'local_accessone.sqlite');
+// SQLITE_PATH lets tests use their own throwaway database file.
+const sqliteDbPath = process.env.SQLITE_PATH || path.join(process.cwd(), 'local_accessone.sqlite');
 
 function persistDb() {
   if (!sqliteDbInstance) return;
   try {
+    // Atomic save: write a temp file, then rename over the real one, so a crash or kill
+    // mid-write can never leave a truncated database file.
     const data = sqliteDbInstance.export();
-    fs.writeFileSync(sqliteDbPath, Buffer.from(data));
+    const tmpPath = `${sqliteDbPath}.tmp`;
+    fs.writeFileSync(tmpPath, Buffer.from(data));
+    fs.renameSync(tmpPath, sqliteDbPath);
   } catch (err) {
-    console.error('Failed to persist SQLite DB:', err);
+    logger.error('Failed to persist SQLite DB', { err: err });
   }
 }
 
@@ -101,8 +108,7 @@ export async function getSqliteConnection() {
     syncSchemaCache();
 
     process.on('beforeExit', persistDb);
-    process.on('SIGINT', () => { persistDb(); process.exit(0); });
-    process.on('SIGTERM', () => { persistDb(); process.exit(0); });
+    // SIGINT/SIGTERM are handled by the server's graceful shutdown, which calls closeDatabase().
   }
 
   return {
@@ -237,10 +243,11 @@ if (cleanedConnectString.includes('accessonedev_low')) {
 
 const dbConfig: oracledb.PoolAttributes = {
   connectString: cleanedConnectString,
+  // Credentials come only from the environment (.env on the server). No defaults in code.
   user: process.env.ORACLE_USER || 'ACCESSONE_APP',
-  password: process.env.ORACLE_PASSWORD || 'Muh@mmadha6is',
+  password: process.env.ORACLE_PASSWORD || '',
   walletLocation: resolvedWalletPath,
-  walletPassword: process.env.ORACLE_WALLET_PASSWORD || 'P@55wo6d',
+  walletPassword: process.env.ORACLE_WALLET_PASSWORD || '',
   poolMin: 2,
   poolMax: 10,
   poolIncrement: 1,
@@ -282,6 +289,16 @@ export function sanitizeBinds(binds: any): any {
   return binds;
 }
 
+// Graceful shutdown: flush the SQLite file / drain the Oracle pool.
+export async function closeDatabase() {
+  if (persistDebounceTimer) { clearTimeout(persistDebounceTimer); persistDebounceTimer = null; }
+  persistDb();
+  if (pool) {
+    try { await pool.close(10); } catch (err) { logger.error('[DB] pool close failed', { err: err }); }
+    pool = null;
+  }
+}
+
 export async function getConnection() {
   const hasWalletFiles = fs.existsSync(path.join(resolvedWalletPath, 'cwallet.sso')) || 
                          fs.existsSync(path.join(resolvedWalletPath, 'ewallet.pem')) ||
@@ -291,8 +308,11 @@ export async function getConnection() {
   if (hasWalletFiles) {
     try {
       if (!pool) {
+        if (!process.env.ORACLE_PASSWORD) {
+          throw new Error('ORACLE_PASSWORD is not set. Add ORACLE_PASSWORD (and ORACLE_WALLET_PASSWORD if the wallet is encrypted) to .env.');
+        }
         pool = await oracledb.createPool(dbConfig);
-        console.log('[DB] Oracle Autonomous Database connection pool created successfully.');
+        logger.info('[DB] Oracle Autonomous Database connection pool created successfully.');
       }
       const conn = await pool.getConnection();
       activeEngine = 'oracle';
@@ -309,12 +329,18 @@ export async function getConnection() {
       };
       return conn;
     } catch (err: any) {
-      console.error('[DB] Failed connecting to Oracle Autonomous Database:', err);
+      logger.error('[DB] Failed connecting to Oracle Autonomous Database', { err: err });
       throw err;
     }
   }
 
-  // Only fallback to SQLite if NO wallet files exist at all
+  // Production must never silently run on a blank local file: refuse instead of falling back.
+  // (ALLOW_SQLITE=true is only for deliberate local smoke tests of a production build.)
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SQLITE !== 'true') {
+    throw new Error(`Oracle wallet not found in ${resolvedWalletPath} (need cwallet.sso / ewallet.pem / tnsnames.ora). Refusing to fall back to SQLite in production.`);
+  }
+
+  // Development / tests only: local SQLite file when no wallet is present
   activeEngine = 'sqlite';
   return await getSqliteConnection();
 }
@@ -323,7 +349,7 @@ export async function initializeDatabase() {
   let connection;
   try {
     connection = await getConnection();
-    console.log('Database connection successful.');
+    logger.info('Database connection successful.');
 
     // Create tables if they don't exist
     // Note: Oracle doesn't have "CREATE TABLE IF NOT EXISTS"
@@ -555,13 +581,30 @@ export async function initializeDatabase() {
         priority VARCHAR2(50) DEFAULT 'normal',
         isRead NUMBER(1) DEFAULT 0,
         "TIMESTAMP" VARCHAR2(50)
+      )`,
+      // Ledger of one-time data migrations that have been applied (each runs exactly once).
+      `CREATE TABLE schemaMigrations (
+        id VARCHAR2(100) PRIMARY KEY,
+        appliedAt VARCHAR2(50) NOT NULL
+      )`,
+      // Counters for sequential document numbers (one row per series, e.g. PASS-2026).
+      `CREATE TABLE sequenceCounters (
+        seqKey VARCHAR2(100) PRIMARY KEY,
+        currentValue NUMBER NOT NULL
+      )`,
+      // Ledger of scheduled job runs; the primary key (job + business date) also acts as a run lock.
+      `CREATE TABLE jobRuns (
+        id VARCHAR2(150) PRIMARY KEY,
+        startedAt VARCHAR2(50) NOT NULL,
+        finishedAt VARCHAR2(50),
+        status VARCHAR2(20) NOT NULL
       )`    ];
 
     for (const sql of tables) {
       try {
         const tableName = sql.match(/CREATE TABLE (\w+)/i)?.[1];
         if (!tableName) {
-          console.error('Could not extract table name from SQL:', sql);
+          logger.error('Could not extract table name from SQL', { err: sql });
           continue;
         }
         
@@ -570,11 +613,11 @@ export async function initializeDatabase() {
         const result = await connection.execute(checkSql, [tableName]);
         
         if (result.rows && result.rows.length === 0) {
-          console.log(`Creating table ${tableName}...`);
+          logger.info(`Creating table ${tableName}...`);
           await connection.execute(sql);
-          console.log(`Table ${tableName} created successfully.`);
+          logger.info(`Table ${tableName} created successfully.`);
         } else {
-          console.log(`Table ${tableName} already exists.`);
+          logger.info(`Table ${tableName} already exists.`);
         }
         if (tableName.toLowerCase() === 'users') {
             const userColumns = [
@@ -596,7 +639,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE users ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to users table.`);
+                logger.info(`Added ${col.name} column to users table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'locations') {
@@ -605,21 +648,21 @@ export async function initializeDatabase() {
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE locations ADD (categoryId VARCHAR2(50))`);
-              console.log('Added categoryId column to locations table.');
+              logger.info('Added categoryId column to locations table.');
             }
             // Check if status column exists in locations table
             const statusColCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'LOCATIONS' AND column_name = 'STATUS'`;
             const statusColResult = await connection.execute(statusColCheckSql);
             if (statusColResult.rows && statusColResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE locations ADD (status VARCHAR2(50) DEFAULT 'active')`);
-              console.log('Added status column to locations table.');
+              logger.info('Added status column to locations table.');
             }
             // Check if organizationId column exists in locations table
             const orgColCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'LOCATIONS' AND column_name = 'ORGANIZATIONID'`;
             const orgColResult = await connection.execute(orgColCheckSql);
             if (orgColResult.rows && orgColResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE locations ADD (organizationId VARCHAR2(50))`);
-              console.log('Added organizationId column to locations table.');
+              logger.info('Added organizationId column to locations table.');
             }
             // Global Port & Security Level
             const locCols = [
@@ -630,7 +673,7 @@ export async function initializeDatabase() {
               const cCheck = await connection.execute(`SELECT column_name FROM user_tab_cols WHERE table_name = 'LOCATIONS' AND column_name = '${col.name}'`);
               if (cCheck.rows && cCheck.rows.length === 0) {
                 await connection.execute(`ALTER TABLE locations ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to locations table.`);
+                logger.info(`Added ${col.name} column to locations table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'employees') {
@@ -639,14 +682,14 @@ export async function initializeDatabase() {
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE employees ADD (name VARCHAR2(255))`);
-              console.log('Added name column to employees table.');
+              logger.info('Added name column to employees table.');
             }
             // Check if employeeId column exists in employees table
             const empIdCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'EMPLOYEES' AND column_name = 'EMPLOYEEID'`;
             const empIdResult = await connection.execute(empIdCheckSql);
             if (empIdResult.rows && empIdResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE employees ADD (employeeId VARCHAR2(50))`);
-              console.log('Added employeeId column to employees table.');
+              logger.info('Added employeeId column to employees table.');
             }
 
             // Ensure all other columns exist
@@ -678,7 +721,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE employees ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to employees table.`);
+                logger.info(`Added ${col.name} column to employees table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'passrequests') {
@@ -715,7 +758,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE passRequests ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to passRequests table.`);
+                logger.info(`Added ${col.name} column to passRequests table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'passes') {
@@ -747,7 +790,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE passes ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to passes table.`);
+                logger.info(`Added ${col.name} column to passes table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'projects') {
@@ -763,7 +806,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE projects ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to projects table.`);
+                logger.info(`Added ${col.name} column to projects table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'divisions') {
@@ -771,14 +814,14 @@ export async function initializeDatabase() {
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE divisions ADD (organizationId VARCHAR2(50))`);
-              console.log('Added organizationId column to divisions table.');
+              logger.info('Added organizationId column to divisions table.');
             }
           } else if (tableName.toLowerCase() === 'departments') {
             const colCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'DEPARTMENTS' AND column_name = 'ORGANIZATIONID'`;
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE departments ADD (organizationId VARCHAR2(50))`);
-              console.log('Added organizationId column to departments table.');
+              logger.info('Added organizationId column to departments table.');
             }
           } else if (tableName.toLowerCase() === 'auditlogs' || tableName.toLowerCase() === 'auditlogs_archive') {
             const upperTbl = tableName.toUpperCase();
@@ -786,7 +829,7 @@ export async function initializeDatabase() {
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE ${tableName} ADD (organizationId VARCHAR2(50))`);
-              console.log(`Added organizationId column to ${tableName} table.`);
+              logger.info(`Added organizationId column to ${tableName} table.`);
             }
           } else if (tableName.toLowerCase() === 'accesscodes') {
             // Check if status column exists in accessCodes table
@@ -794,13 +837,13 @@ export async function initializeDatabase() {
             const colResult = await connection.execute(colCheckSql);
             if (colResult.rows && colResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE accessCodes ADD (status VARCHAR2(50) DEFAULT 'active')`);
-              console.log('Added status column to accessCodes table.');
+              logger.info('Added status column to accessCodes table.');
             }
             const orgColCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'ACCESSCODES' AND column_name = 'ORGANIZATIONID'`;
             const orgColResult = await connection.execute(orgColCheckSql);
             if (orgColResult.rows && orgColResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE accessCodes ADD (organizationId VARCHAR2(50))`);
-              console.log('Added organizationId column to accessCodes table.');
+              logger.info('Added organizationId column to accessCodes table.');
             }
             // Global Access Code & Security Clearance Tier
             const accCols = [
@@ -811,7 +854,7 @@ export async function initializeDatabase() {
               const cCheck = await connection.execute(`SELECT column_name FROM user_tab_cols WHERE table_name = 'ACCESSCODES' AND column_name = '${col.name}'`);
               if (cCheck.rows && cCheck.rows.length === 0) {
                 await connection.execute(`ALTER TABLE accessCodes ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to accessCodes table.`);
+                logger.info(`Added ${col.name} column to accessCodes table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'categories') {
@@ -819,13 +862,13 @@ export async function initializeDatabase() {
             const orgColResult = await connection.execute(orgColCheckSql);
             if (orgColResult.rows && orgColResult.rows.length === 0) {
               await connection.execute(`ALTER TABLE categories ADD (organizationId VARCHAR2(50))`);
-              console.log('Added organizationId column to categories table.');
+              logger.info('Added organizationId column to categories table.');
             }
       const defaultOrgColCheckSql = "SELECT column_name FROM user_tab_cols WHERE table_name = 'CATEGORIES' AND column_name = 'ISDEFAULTORG'";
       const defaultOrgColResult = await connection.execute(defaultOrgColCheckSql);
       if (defaultOrgColResult.rows && defaultOrgColResult.rows.length === 0) {
         await connection.execute('ALTER TABLE categories ADD (isDefaultOrg NUMBER(1) DEFAULT 0)');
-        console.log('Added isDefaultOrg column to categories table.');
+        logger.info('Added isDefaultOrg column to categories table.');
       }
           } else if (tableName.toLowerCase() === 'companysettings') {
             const columns = [
@@ -850,7 +893,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE companySettings ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to companySettings table.`);
+                logger.info(`Added ${col.name} column to companySettings table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'organizations') {
@@ -875,7 +918,7 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE organizations ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to organizations table.`);
+                logger.info(`Added ${col.name} column to organizations table.`);
               }
             }
           } else if (tableName.toLowerCase() === 'notifications') {
@@ -888,12 +931,12 @@ export async function initializeDatabase() {
               const colResult = await connection.execute(colCheckSql);
               if (colResult.rows && colResult.rows.length === 0) {
                 await connection.execute(`ALTER TABLE notifications ADD (${col.name} ${col.type})`);
-                console.log(`Added ${col.name} column to notifications table.`);
+                logger.info(`Added ${col.name} column to notifications table.`);
               }
             }
           }
       } catch (err) {
-        console.error(`Error processing table:`, err);
+        logger.error(`Error processing table`, { err: err });
       }
     }
 
@@ -910,7 +953,7 @@ export async function initializeDatabase() {
         await connection.execute(`INSERT INTO categories (id, name) VALUES (:id, :name)`, cat);
       }
       await connection.commit();
-      console.log('Default categories created.');
+      logger.info('Default categories created.');
     }
 
     // Insert default company settings if not exists
@@ -934,7 +977,7 @@ export async function initializeDatabase() {
         ]
       );
       await connection.commit();
-      console.log('Default company settings created.');
+      logger.info('Default company settings created.');
     }
 
     // Seed default organization in organizations table if not exists
@@ -965,91 +1008,60 @@ export async function initializeDatabase() {
         await connection.commit();
       }
     } catch (orgErr) {
-      console.error('Non-critical organization seed warning:', orgErr);
+      logger.error('Non-critical organization seed warning', { err: orgErr });
     }
 
-    // Bootstrap Platform Power Admins (Software Root) and Client Organization Super Admins
-    const defaultSuperUsers = [
-      {
-        id: 'poweradmin-haris-1',
-        email: 'm.techsandgadgets@gmail.com',
-        displayName: 'Muhammad Haris',
-        role: 'power_admin',
-        status: 'active',
-        jobTitle: 'Global Software Owner & Power Admin',
-        department: 'Platform Architecture & SaaS Engine',
-        division: 'Techsandgadgets Global Platform (Vendor Root)'
-      },
-      {
-        id: 'admin-harispuliyav',
-        email: 'harispuliyav@gmail.com',
-        displayName: 'Haris Puliyav',
-        role: 'admin',
-        status: 'active',
-        jobTitle: 'Organization Super Admin',
-        department: 'Administration & Operations',
-        division: 'Executive Management',
-        organizationId: 'org-habari'
-      },
-      {
-        id: 'admin-1',
-        email: 'dc@habariengineering.com',
-        displayName: 'DC Admin',
-        role: 'admin',
-        status: 'active',
-        jobTitle: 'Organization Super Admin',
-        department: 'Administration',
-        division: 'Engineering',
-        organizationId: 'org-habari'
-      }
-    ];
-
-    const hashedPassword = await bcrypt.hash('password123', 10);
-    const nowIso = new Date().toISOString();
-
-    for (const su of defaultSuperUsers) {
-      try {
-        const uCheck = await connection.execute(`SELECT id FROM users WHERE LOWER(email) = LOWER(:email)`, [su.email]);
-        if (uCheck.rows && uCheck.rows.length === 0) {
-          console.log(`Bootstrapping ${su.role}: ${su.email}...`);
-          await connection.execute(
-            `INSERT INTO users (id, email, password, role, displayName, photoURL, status, jobTitle, department, division, createdAt, organizationId) 
-             VALUES (:id, :email, :password, :role, :displayName, :photoURL, :status, :jobTitle, :department, :division, :createdAt, :organizationId)`,
-            {
-              id: su.id,
-              email: su.email.toLowerCase(),
-              password: hashedPassword,
-              role: su.role,
-              displayName: su.displayName,
-              photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(su.displayName)}&background=${su.role === 'power_admin' ? '0F172A' : '800020'}&color=fff`,
-              status: su.status,
-              jobTitle: su.jobTitle,
-              department: su.department,
-              division: su.division,
-              createdAt: nowIso,
-              organizationId: (su as any).organizationId || null
-            }
-          );
-          await connection.commit();
-          console.log(`Created ${su.role}: ${su.email}`);
+    // Bootstrap the first platform owner (power_admin) — only when none exists, and only from
+    // environment variables. No accounts or passwords are hard-coded, and existing accounts are
+    // never modified here (roles/status are managed in the app).
+    //   BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD (min 12 chars), BOOTSTRAP_ADMIN_NAME (optional)
+    try {
+      const paCheck = await connection.execute(`SELECT id FROM users WHERE role = 'power_admin'`);
+      const hasPowerAdmin = !!(paCheck.rows && paCheck.rows.length > 0);
+      const bootEmail = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+      const bootPassword = process.env.BOOTSTRAP_ADMIN_PASSWORD || '';
+      if (!hasPowerAdmin) {
+        if (!bootEmail || bootPassword.length < 12) {
+          logger.warn('No power_admin account exists. Set BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (12+ chars) and restart to create one.');
         } else {
-          // Ensure role is correctly updated (power_admin vs admin)
-          await connection.execute(
-            `UPDATE users SET role = :role, status = 'active', displayName = :name, jobTitle = :jobTitle, department = :dept, division = :div, organizationId = COALESCE(organizationId, :orgId) WHERE LOWER(email) = LOWER(:email)`,
-            { 
-              role: su.role,
-              name: su.displayName, 
-              jobTitle: su.jobTitle,
-              dept: su.department,
-              div: su.division,
-              orgId: (su as any).organizationId || null,
-              email: su.email.toLowerCase() 
-            }
-          );
+          const existing = await connection.execute(`SELECT id FROM users WHERE LOWER(email) = :email`, [bootEmail]);
+          if (existing.rows && existing.rows.length > 0) {
+            // Promote the named existing account; its password is left as is.
+            await connection.execute(`UPDATE users SET role = 'power_admin', status = 'active' WHERE LOWER(email) = :email`, [bootEmail]);
+          } else {
+            const displayName = process.env.BOOTSTRAP_ADMIN_NAME || 'Platform Owner';
+            await connection.execute(
+              `INSERT INTO users (id, email, password, role, displayName, status, createdAt)
+               VALUES (:id, :email, :password, 'power_admin', :displayName, 'active', :createdAt)`,
+              {
+                id: crypto.randomUUID(),
+                email: bootEmail,
+                password: await bcrypt.hash(bootPassword, 12),
+                displayName,
+                createdAt: new Date().toISOString()
+              }
+            );
+          }
           await connection.commit();
+          logger.info(`Bootstrapped power_admin account for ${bootEmail}. Remove BOOTSTRAP_ADMIN_PASSWORD from the environment now.`);
         }
-      } catch (userErr) {
-        console.error(`Warning processing user ${su.email}:`, userErr);
+      }
+    } catch (userErr) {
+      logger.error('Power admin bootstrap failed', { err: userErr });
+    }
+
+    // Soft delete: records with history value are marked deleted, never removed.
+    for (const table of ['employees', 'passes', 'passRequests', 'locations', 'categories']) {
+      for (const col of ['deletedAt', 'deletedBy']) {
+        try {
+          await connection.execute(`SELECT ${col} FROM ${table} WHERE 1=0`);
+        } catch (err: any) {
+          if (/ORA-00904|no such column/i.test(String(err?.message))) {
+            await connection.execute(`ALTER TABLE ${table} ADD (${col} VARCHAR2(50))`);
+            await connection.commit();
+            logger.info(`Added ${col} column to ${table}.`);
+          }
+        }
       }
     }
 
@@ -1058,7 +1070,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT individualExpiries FROM passRequests WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding individualExpiries column to passRequests...');
+        logger.info('Adding individualExpiries column to passRequests...');
         await connection.execute(`ALTER TABLE passRequests ADD (individualExpiries CLOB)`);
         await connection.commit();
       }
@@ -1068,7 +1080,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT individualStartDates FROM passRequests WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding individualStartDates column to passRequests...');
+        logger.info('Adding individualStartDates column to passRequests...');
         await connection.execute(`ALTER TABLE passRequests ADD (individualStartDates CLOB)`);
         await connection.commit();
       }
@@ -1078,7 +1090,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT contractTitle FROM passRequests WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding contractTitle column to passRequests...');
+        logger.info('Adding contractTitle column to passRequests...');
         await connection.execute(`ALTER TABLE passRequests ADD (contractTitle VARCHAR2(255))`);
         await connection.commit();
       }
@@ -1088,7 +1100,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT expiryDate FROM passRequests WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding expiryDate column to passRequests...');
+        logger.info('Adding expiryDate column to passRequests...');
         await connection.execute(`ALTER TABLE passRequests ADD (expiryDate VARCHAR2(50))`);
         await connection.commit();
       }
@@ -1099,7 +1111,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT cardNumber FROM passes WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding cardNumber column to passes...');
+        logger.info('Adding cardNumber column to passes...');
         await connection.execute(`ALTER TABLE passes ADD (cardNumber VARCHAR2(100))`);
         await connection.commit();
       }
@@ -1109,7 +1121,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT endDate FROM passes WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding endDate column to passes...');
+        logger.info('Adding endDate column to passes...');
         await connection.execute(`ALTER TABLE passes ADD (endDate VARCHAR2(50))`);
         await connection.commit();
       }
@@ -1119,7 +1131,7 @@ export async function initializeDatabase() {
       await connection.execute(`SELECT contractTitle FROM passes WHERE 1=0`);
     } catch (err: any) {
       if (err.message.includes('ORA-00904')) {
-        console.log('Adding contractTitle column to passes...');
+        logger.info('Adding contractTitle column to passes...');
         await connection.execute(`ALTER TABLE passes ADD (contractTitle VARCHAR2(255))`);
         await connection.commit();
       }
@@ -1131,37 +1143,31 @@ export async function initializeDatabase() {
     await connection.execute(`UPDATE passRequests SET createdAt = :now WHERE createdAt IS NULL`, [new Date().toISOString()]);
     await connection.execute(`UPDATE passRequests SET updatedAt = :now WHERE updatedAt IS NULL`, [new Date().toISOString()]);
 
-    // Backfill organizationId for locations, categories, accessCodes
-    try {
-      await connection.execute(`UPDATE locations SET organizationId = 'org-habari' WHERE organizationId IS NULL`);
-      await connection.execute(`UPDATE categories SET organizationId = 'org-habari' WHERE organizationId IS NULL`);
-      await connection.execute(`UPDATE accessCodes SET organizationId = 'org-habari' WHERE organizationId IS NULL`);
-    } catch (orgBackfillErr) {
-      console.error('Non-critical organizationId backfill notice:', orgBackfillErr);
-    }
+    // (The one-time organizationId backfill for legacy locations/categories/accessCodes is now a
+    // recorded data migration in server.ts, so global items created later are not reassigned.)
 
-    // Cleanup dangling mapping records
+    // Cleanup dangling derived link rows (rebuilt from passRequests; no history lost)
     try {
       await connection.execute(`DELETE FROM passRequestEmployees WHERE requestId NOT IN (SELECT id FROM passRequests)`);
       await connection.execute(`DELETE FROM passRequestAccessCodes WHERE requestId NOT IN (SELECT id FROM passRequests)`);
       await connection.execute(`DELETE FROM passAccessCodes WHERE passId NOT IN (SELECT id FROM passes)`);
-      await connection.execute(`DELETE FROM passAccessCodes WHERE passId IN (SELECT id FROM passes WHERE employeeId IS NOT NULL AND employeeId NOT IN (SELECT id FROM employees))`);
-      await connection.execute(`DELETE FROM passes WHERE employeeId IS NOT NULL AND employeeId NOT IN (SELECT id FROM employees)`);
+      // NOTE: passes are never deleted here. (This previously deleted every pass whose employee
+      // had been removed, on every startup — silently erasing pass history.)
     } catch (cleanErr) {
-      console.error('Non-critical cleanup warning:', cleanErr);
+      logger.error('Non-critical cleanup warning', { err: cleanErr });
     }
 
     await connection.commit();
-    console.log('Database integrity check and timestamp updates completed.');
+    logger.info('Database integrity check and timestamp updates completed.');
 
   } catch (err) {
-    console.error('Database initialization failed:', err);
+    logger.error('Database initialization failed', { err: err });
   } finally {
     if (connection) {
       try {
         await connection.close();
       } catch (err) {
-        console.error(err);
+        logger.error('Unhandled error', { err: err });
       }
     }
   }

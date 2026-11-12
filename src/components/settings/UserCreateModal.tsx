@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, UserPlus, Mail, Lock, User, Shield, Briefcase, Building2, Phone, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
 import { UserRole, Division, Project, Department } from '../../types';
-import { apiFetch } from '../../lib/utils';
+import { apiFetch, generateTempPassword } from '../../lib/utils';
 
 interface UserCreateModalProps {
   isOpen: boolean;
@@ -24,7 +24,7 @@ export function UserCreateModal({
 }: UserCreateModalProps) {
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [password, setPassword] = useState('password123');
+  const [password, setPassword] = useState(() => generateTempPassword());
   const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<UserRole>('requester');
   const [status, setStatus] = useState<'active' | 'pending'>('active');
@@ -44,8 +44,8 @@ export function UserCreateModal({
       return;
     }
 
-    if (password.length < 6) {
-      showToast('Password must be at least 6 characters long', 'error');
+    if (password.length < 8) {
+      showToast('Password must be at least 8 characters long', 'error');
       return;
     }
 
@@ -143,7 +143,7 @@ export function UserCreateModal({
                   required
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  placeholder="Minimum 6 characters"
+                  placeholder="Minimum 8 characters"
                   className="w-full pl-3 pr-8 py-2 text-xs rounded-lg border border-slate-200 focus:border-[#800020] outline-none font-mono"
                 />
                 <button

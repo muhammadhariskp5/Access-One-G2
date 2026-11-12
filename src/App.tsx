@@ -23,6 +23,7 @@ import {
   isPowerAdmin
 } from './types';
 import { apiFetch, cn } from './lib/utils';
+import { startRealtime, stopRealtime, onDataChanged, isRealtimeConnected } from './lib/realtime';
 
 // --- Components ---
 import { Modal } from './components/common/Modal';
@@ -322,35 +323,88 @@ export default function App() {
     }
   };
 
+  // Latest fetchData for long-lived listeners below (avoids stale closures)
+  const fetchDataRef = useRef(fetchData);
+  fetchDataRef.current = fetchData;
+
+  // Refetch only the named lists (used by the realtime change feed)
+  const fetchResources = async (resources: string[]) => {
+    if (!user) return;
+    const endpoints: Record<string, [string, any, (v: any) => void]> = {
+      employees: ['/api/employees', [], v => setEmployees(Array.isArray(v) ? v : [])],
+      passes: ['/api/passes', [], v => setPasses(Array.isArray(v) ? v : [])],
+      passApplications: ['/api/passApplications', [], v => setApplications(Array.isArray(v) ? v : [])],
+      locations: ['/api/locations', [], v => setLocations(Array.isArray(v) ? v : [])],
+      categories: ['/api/categories', [], v => setCategories(Array.isArray(v) ? v : [])],
+      accessCodes: ['/api/accessCodes', [], v => setAccessCodes(Array.isArray(v) ? v : [])],
+      company: ['/api/settings/company', null, v => { if (v && typeof v === 'object' && !Array.isArray(v)) setCompany(v); }],
+      users: ['/api/users', [], v => setAllUsers(Array.isArray(v) ? v : [])],
+      auditLogs: ['/api/auditLogs', [], v => setAuditLogs(Array.isArray(v) ? v : [])],
+      divisions: ['/api/divisions', [], v => setDivisions(Array.isArray(v) ? v : [])],
+      projects: ['/api/projects', [], v => setProjects(Array.isArray(v) ? v : [])],
+      departments: ['/api/departments', [], v => setDepartments(Array.isArray(v) ? v : [])],
+    };
+    await Promise.all(resources.filter(r => endpoints[r]).map(async r => {
+      const [url, fallback, apply] = endpoints[r];
+      const result = await safeFetch(url, fallback);
+      if (result.ok) apply(result.value);
+    }));
+  };
+  const fetchResourcesRef = useRef(fetchResources);
+  fetchResourcesRef.current = fetchResources;
+
+  // Data freshness: push, not polling.
+  // The server announces which lists changed (src/lib/realtime.ts); we refetch only those, batched.
+  // While the tab is hidden, changes are remembered and fetched when it becomes visible again.
+  // Only if the live connection is down do we fall back to a slow full refresh.
   useEffect(() => {
-    if (user) {
-      setIsLoading(true);
-      fetchData();
-      
-      // Smart background polling: only poll if tab is visible, at a conservative 30s interval
-      // Dedicated views (like Audit Logs) have configurable high-speed polling with UI toggles
-      const interval = setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          fetchData();
-        }
-      }, 30000);
-
-      const handleVisibilityChange = () => {
-        if (document.visibilityState === 'visible') {
-          fetchData();
-        }
-      };
-
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-
-      return () => {
-        clearInterval(interval);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-      };
-    } else {
+    if (!user) {
       clearUserDataState();
       setIsLoading(false);
+      return;
     }
+
+    setIsLoading(true);
+    fetchDataRef.current();
+    startRealtime();
+
+    const pending = new Set<string>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = () => {
+      flushTimer = null;
+      if (document.visibilityState !== 'visible' || pending.size === 0) return;
+      const list = Array.from(pending);
+      pending.clear();
+      if (list.includes('*')) fetchDataRef.current();
+      else fetchResourcesRef.current(list);
+    };
+
+    const offChange = onDataChanged(resources => {
+      resources.forEach(r => pending.add(r));
+      if (!flushTimer) flushTimer = setTimeout(flush, 300); // collapse bursts of writes into one fetch
+    });
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        if (!isRealtimeConnected()) pending.add('*');
+        flush();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const FALLBACK_MS = 120000;
+    const fallback = setInterval(() => {
+      if (!isRealtimeConnected() && document.visibilityState === 'visible') fetchDataRef.current();
+    }, FALLBACK_MS);
+
+    return () => {
+      offChange();
+      stopRealtime();
+      if (flushTimer) clearTimeout(flushTimer);
+      clearInterval(fallback);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [user?.id]);
 
   // Presence Tracking & Heartbeat
@@ -530,6 +584,8 @@ export default function App() {
         body: JSON.stringify({ userId: user.id })
       }).catch(() => {});
     }
+    // Clears the httpOnly session cookie (the browser cannot remove it itself)
+    apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     clearUserDataState();
     setUser(null);
     localStorage.removeItem('user');
@@ -851,8 +907,9 @@ export default function App() {
                 />
               } />
               <Route path="/employees/:id" element={
-                <EmployeeDetail 
+                <EmployeeDetail
                   employees={employees}
+                  applications={applications}
                   passes={passes}
                   locations={locations}
                   accessCodes={accessCodes}

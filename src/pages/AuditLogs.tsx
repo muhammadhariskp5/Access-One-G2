@@ -24,7 +24,7 @@ import {
   Wifi,
   Radio
 } from 'lucide-react';
-import { cn, formatDateTime } from '../lib/utils';
+import { cn, formatDateTime, apiFetch } from '../lib/utils';
 import { AuditLog, UserProfile, Division, Project, Department } from '../types';
 import { UserSettingsModal } from '../components/settings/UserSettingsModal';
 
@@ -43,7 +43,7 @@ interface AuditLogsProps {
 }
 
 export function AuditLogs({ 
-  logs, 
+  logs: recentLogs, 
   globalSearch,
   allUsers = [],
   currentUser = null,
@@ -56,6 +56,32 @@ export function AuditLogs({
   showConfirm = () => {}
 }: AuditLogsProps) {
   const navigate = useNavigate();
+
+  // The app keeps only the newest page of audit entries; older pages are loaded on demand.
+  const AUDIT_PAGE_SIZE = 500;
+  const [olderLogs, setOlderLogs] = useState<AuditLog[]>([]);
+  const [hasOlder, setHasOlder] = useState(true);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const logs = useMemo(() => {
+    const seen = new Set<string>();
+    return [...recentLogs, ...olderLogs].filter(l => (seen.has(l.id) ? false : (seen.add(l.id), true)));
+  }, [recentLogs, olderLogs]);
+
+  const loadOlderLogs = async () => {
+    const oldest = logs[logs.length - 1]?.timestamp;
+    if (!oldest) return;
+    setIsLoadingOlder(true);
+    try {
+      const res = await apiFetch(`/api/auditLogs?limit=${AUDIT_PAGE_SIZE}&before=${encodeURIComponent(oldest)}`);
+      const page: AuditLog[] = res.ok ? await res.json() : [];
+      setOlderLogs(prev => [...prev, ...page]);
+      if (page.length < AUDIT_PAGE_SIZE) setHasOlder(false);
+    } catch (e: any) {
+      showToast(e?.message || 'Failed to load older entries', 'error');
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  };
 
   // Polling / Live Sync state with localStorage persistence
   const [isAutoRefresh, setIsAutoRefresh] = useState<boolean>(() => {
@@ -117,7 +143,6 @@ export function AuditLogs({
     const isPowerAdmin = currentUser?.role === 'power_admin';
     const scopedLogs = logs.filter(log => {
       if (!isPowerAdmin) {
-        if (log.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
         if (log.userId === 'system' || (log.userName?.toLowerCase() === 'system' && !log.organizationId)) return false;
         if (currentUser?.organizationId && log.organizationId && log.organizationId !== currentUser.organizationId) return false;
       }
@@ -138,7 +163,6 @@ export function AuditLogs({
     return logs.filter(log => {
       // Non-power admin must never see power admin or system action logs
       if (!isPowerAdmin) {
-        if (log.userEmail?.toLowerCase() === 'm.techsandgadgets@gmail.com') return false;
         if (log.userId === 'system' || (log.userName?.toLowerCase() === 'system' && !log.organizationId)) return false;
         if (currentUser?.organizationId && log.organizationId && log.organizationId !== currentUser.organizationId) return false;
       }
@@ -393,6 +417,17 @@ export function AuditLogs({
             <Settings2 size={13} className="text-slate-600" />
             <span>User Settings</span>
           </button>
+
+          {hasOlder && logs.length >= AUDIT_PAGE_SIZE && (
+            <button
+              onClick={loadOlderLogs}
+              disabled={isLoadingOlder}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-white text-slate-700 hover:text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+              title="Entries are loaded newest first; load the next older page"
+            >
+              <span>{isLoadingOlder ? 'Loading…' : `Load older entries (${logs.length} shown)`}</span>
+            </button>
+          )}
 
           <button
             onClick={handleExportCSV}

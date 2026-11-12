@@ -85,7 +85,7 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
 
     setIsSubmitting(true);
     const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim();
-    const finalEmployeeId = data.employeeId?.trim() || `EMP-${Math.random().toString(36).substr(2, 5)}`;
+    const finalEmployeeId = data.employeeId?.trim() || `EMP-${crypto.randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
     
     try {
       let savedEmp: Employee | undefined;

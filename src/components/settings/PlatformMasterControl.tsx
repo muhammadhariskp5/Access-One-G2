@@ -41,7 +41,7 @@ import {
   Info,
   ShieldAlert
 } from 'lucide-react';
-import { apiFetch, cn } from '../../lib/utils';
+import { apiFetch, cn, generateTempPassword } from '../../lib/utils';
 import { 
   BrandingSettings, 
   OrganizationTenant, 
@@ -102,7 +102,7 @@ export function PlatformMasterControl({
 
   // Admin Password Reset Modal State
   const [resetPasswordCompany, setResetPasswordCompany] = useState<OrganizationTenant | null>(null);
-  const [newPasswordValue, setNewPasswordValue] = useState('password123');
+  const [newPasswordValue, setNewPasswordValue] = useState(() => generateTempPassword());
   const [isResetPasswordModalOpen, setIsResetPasswordModalOpen] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
   // Tenant Status Modal State
@@ -132,7 +132,7 @@ export function PlatformMasterControl({
     orgCode: '',
     primaryAdminEmail: '',
     primaryAdminName: 'Lead Super Admin',
-    initialAdminPassword: 'password123',
+    initialAdminPassword: generateTempPassword(),
     licenseTier: 'Enterprise Edition',
     licenseDurationYears: 1,
     maxUsers: 50,
@@ -198,8 +198,8 @@ export function PlatformMasterControl({
     try {
       const payload = {
         ...provisionForm,
-        primaryAdminPassword: provisionForm.initialAdminPassword || (provisionForm as any).primaryAdminPassword || 'password123',
-        initialAdminPassword: provisionForm.initialAdminPassword || 'password123'
+        primaryAdminPassword: provisionForm.initialAdminPassword || (provisionForm as any).primaryAdminPassword,
+        initialAdminPassword: provisionForm.initialAdminPassword
       };
       const res = await apiFetch('/api/platform/companies/license', {
         method: 'POST',
@@ -226,7 +226,7 @@ export function PlatformMasterControl({
         orgCode: '',
         primaryAdminEmail: '',
         primaryAdminName: 'Lead Super Admin',
-        initialAdminPassword: 'password123',
+        initialAdminPassword: generateTempPassword(),
         licenseTier: 'Enterprise Edition',
         licenseDurationYears: 1,
         maxUsers: 50,
@@ -359,7 +359,7 @@ export function PlatformMasterControl({
   // Open Reset Admin Password Modal
   const handleOpenResetPassword = (comp: OrganizationTenant) => {
     setResetPasswordCompany(comp);
-    setNewPasswordValue('password123');
+    setNewPasswordValue(generateTempPassword());
     setIsResetPasswordModalOpen(true);
   };
 
@@ -953,7 +953,7 @@ export function PlatformMasterControl({
                   <input
                     type="text"
                     required
-                    value={provisionForm.initialAdminPassword || 'password123'}
+                    value={provisionForm.initialAdminPassword}
                     onChange={(e) => setProvisionForm({ ...provisionForm, initialAdminPassword: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-semibold focus:bg-white focus:border-[#800020] outline-none"
                   />
@@ -1376,8 +1376,8 @@ Initial Password: ${selectedWelcomePackage.primaryAdminPassword}
 --- QUOTAS & SLA ---
 Allocated Seats: ${selectedWelcomePackage.seatQuota}
 Pass Limit: ${selectedWelcomePackage.passQuota}
-Issued By: Techsandgadgets.com (Muhammad Haris)
-Support: m.techsandgadgets@gmail.com
+Issued By: ${selectedWelcomePackage.vendor || '-'}
+Support: ${selectedWelcomePackage.supportContact || '-'}
 =====================================================`;
                   navigator.clipboard.writeText(deliveryText);
                   setCopiedFullPackage(true);
@@ -1577,10 +1577,10 @@ Support: m.techsandgadgets@gmail.com
                   required
                   value={newPasswordValue}
                   onChange={(e) => setNewPasswordValue(e.target.value)}
-                  placeholder="Enter new password (e.g. password123)"
+                  placeholder="Enter new password (min 8 characters)"
                   className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg font-mono font-medium focus:outline-hidden focus:ring-2 focus:ring-[#800020]/20 focus:border-[#800020]"
                 />
-                <p className="text-[10px] text-slate-400">Default recommended setup password: <span className="font-mono text-slate-600 font-bold">password123</span></p>
+                <p className="text-[10px] text-slate-400">A random password is pre-filled; share it securely with the admin.</p>
               </div>
 
               <div className="pt-3 border-t border-slate-100 flex items-center justify-between">

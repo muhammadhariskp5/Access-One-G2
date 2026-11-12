@@ -10,6 +10,7 @@ import {
 } from '../../types';
 import { apiFetch, cn, formatDate, parseToYMD } from '../../lib/utils';
 import { parseExcelDate, detectEmployeeUpdates } from '../../utils/excelUtils';
+import { isApplicationLineInPipeline } from '../../utils/passStatus';
 import { Modal } from '../common/Modal';
 import { SearchInput } from '../common/SearchInput';
 import { EmployeeForm } from '../employees/EmployeeForm';
@@ -145,6 +146,12 @@ export function PassSubmissionForm({
   }[] | null>(null);
   const [isValidityModalOpen, setIsValidityModalOpen] = useState(false);
   const [isSavingDocUpdates, setIsSavingDocUpdates] = useState(false);
+  // 'fix' = opened from a personnel card during selection (save documents only);
+  // 'submit' = opened by the submit-time validation (save documents, then submit).
+  const [validityMode, setValidityMode] = useState<'fix' | 'submit'>('submit');
+  // Document values saved from the Fix modal, applied on top of the employees prop until
+  // the next data refresh brings them back from the server (never mutate props).
+  const [docOverrides, setDocOverrides] = useState<Record<string, Partial<Employee>>>({});
 
   interface ErrorGuidance {
     title: string;
@@ -808,7 +815,7 @@ export function PassSubmissionForm({
       if (!possibleEmpIds.has(p.employeeId)) return false;
       if (isPassFromCurrentApp(p)) return false;
       if (p.type !== 'main') return false;
-      if (p.status === 'expired' || p.status === 'revoked' || p.status === 'cancelled' || p.status === 'replaced' || p.status === 'rejected') return false;
+      if (['expired', 'revoked', 'cancelled', 'replaced', 'superseded', 'inactive', 'rejected'].includes((p.status || '').toLowerCase())) return false;
 
       // 45-day early renewal rule: If pass is within 45 days of expiry, a new renewal Main Pass application is allowed
       if (p.expiryDate) {
@@ -907,13 +914,14 @@ export function PassSubmissionForm({
     return applications.find(a => {
       if (isCurrentApp(a)) return false;
       if (a.type !== 'main') return false;
-      if (a.status === 'rejected' || a.status === 'cancelled' || a.status === 'archived') return false;
 
       const appEmpIds = a.employeeIds || [];
       const matchedEmpId = appEmpIds.find(id => possibleEmpIds.has(id));
       if (!matchedEmpId) return false;
 
-      if (a.employeeStatuses?.[matchedEmpId] === 'rejected' || a.employeeStatuses?.[matchedEmpId] === 'cancelled') return false;
+      // Only applications still in the pipeline (not yet issued) block. After issuance the
+      // pass itself governs via findActiveMainPass (incl. 45-day renewal window).
+      if (!isApplicationLineInPipeline(a.status, a.employeeStatuses?.[matchedEmpId])) return false;
 
       const appLoc = locations.find(l => l.id === a.locationId);
       const appCatId = (a as any).categoryId || appLoc?.categoryId;
@@ -925,7 +933,10 @@ export function PassSubmissionForm({
     });
   };
 
-  const checkDocumentValidity = (empIds: string[], targetLocId: string) => {
+  const checkDocumentValidity = (empIds: string[], targetLocId: string) =>
+    checkDocumentValidityWith(empIds, targetLocId, docOverrides);
+
+  const checkDocumentValidityWith = (empIds: string[], targetLocId: string, overrides: Record<string, Partial<Employee>>) => {
     const issues: {
       empId: string;
       employee: Employee;
@@ -940,8 +951,9 @@ export function PassSubmissionForm({
     }[] = [];
 
     for (const empId of empIds) {
-      const emp = employees.find(e => e.id === empId || e.employeeId === empId || e.qatarId === empId);
-      if (!emp) continue;
+      const baseEmp = employees.find(e => e.id === empId || e.employeeId === empId || e.qatarId === empId);
+      if (!baseEmp) continue;
+      const emp: Employee = { ...baseEmp, ...(overrides[baseEmp.id] || {}) };
 
       const empReqStart = parseToYMD(data.individualStartDates[empId] || data.startDate) || new Date().toISOString().split('T')[0];
       const empReqExpiry = parseToYMD(data.individualExpiries[empId] || data.selections[targetLocId]?.expiryDate || data.expiryDate) || '';
@@ -950,7 +962,7 @@ export function PassSubmissionForm({
       const passNum = emp.passportNumber || '';
 
       const visaExp = parseToYMD(emp.qidVisaExpiry || emp.visaExpiry);
-      const visaNum = emp.qidVisaNumber || emp.visaNumber || emp.qatarId || '';
+      const visaNum = emp.qidVisaNumber || emp.visaNumber || '';
 
       let passportIssue = '';
       if (!passExp) {
@@ -1178,36 +1190,38 @@ export function PassSubmissionForm({
     setIsSavingDocUpdates(true);
 
     try {
+      const newOverrides: Record<string, Partial<Employee>> = {};
       for (const issue of validityIssues) {
+        const current: Employee = { ...issue.employee, ...(docOverrides[issue.empId] || {}) };
+        // Only send what actually changed. Visa/QID edits go to the QID/Visa fields the
+        // validation reads (qidVisa*), never overwriting the separate visaNumber/qatarId fields.
+        const payload: Record<string, any> = {};
+        if ((issue.passportNumber || '') !== (current.passportNumber || '')) payload.passportNumber = issue.passportNumber || null;
+        if ((parseToYMD(issue.passportExpiry) || '') !== (parseToYMD(current.passportExpiry) || '')) payload.passportExpiry = parseToYMD(issue.passportExpiry) || null;
+        if ((issue.visaNumber || '') !== (current.qidVisaNumber || current.visaNumber || '')) payload.qidVisaNumber = issue.visaNumber || null;
+        if ((parseToYMD(issue.visaExpiry) || '') !== (parseToYMD(current.qidVisaExpiry || current.visaExpiry) || '')) payload.qidVisaExpiry = parseToYMD(issue.visaExpiry) || null;
+
+        if (Object.keys(payload).length === 0) continue;
+
         await apiFetch(`/api/employees/${issue.empId}`, {
           method: 'PATCH',
-          body: JSON.stringify({
-            passportNumber: issue.passportNumber || null,
-            passportExpiry: issue.passportExpiry || null,
-            visaNumber: issue.visaNumber || null,
-            visaExpiry: issue.visaExpiry || null,
-            qidVisaNumber: issue.visaNumber || null,
-            qidVisaExpiry: issue.visaExpiry || null
-          })
+          body: JSON.stringify(payload)
         });
-
-        // Update local memory employee object
-        const localEmp = employees.find(e => e.id === issue.empId || e.employeeId === issue.empId);
-        if (localEmp) {
-          localEmp.passportNumber = issue.passportNumber;
-          localEmp.passportExpiry = issue.passportExpiry;
-          localEmp.visaNumber = issue.visaNumber;
-          localEmp.visaExpiry = issue.visaExpiry;
-          localEmp.qidVisaNumber = issue.visaNumber;
-          localEmp.qidVisaExpiry = issue.visaExpiry;
-        }
+        newOverrides[issue.empId] = { ...(docOverrides[issue.empId] || {}), ...payload };
       }
 
-      showToast('Updated personnel document validity details', 'success');
+      // checkDocumentValidity reads docOverrides from state, so recompute with the merged
+      // overrides explicitly rather than waiting for the state update.
+      const mergedOverrides = { ...docOverrides, ...newOverrides };
+      setDocOverrides(mergedOverrides);
+      if (Object.keys(newOverrides).length > 0) {
+        showToast('Updated personnel document validity details', 'success');
+      }
 
       const selectedLocIds = Object.keys(data.selections);
       const targetLocId = selectedLocIds[0] || data.locationId;
-      const remainingIssues = checkDocumentValidity(data.employeeIds, targetLocId);
+      const scopeIds = validityMode === 'fix' ? validityIssues.map(i => i.empId) : data.employeeIds;
+      const remainingIssues = checkDocumentValidityWith(scopeIds, targetLocId, mergedOverrides);
 
       if (remainingIssues.length > 0) {
         setValidityIssues(remainingIssues);
@@ -1219,6 +1233,9 @@ export function PassSubmissionForm({
       setIsValidityModalOpen(false);
       setValidityIssues(null);
       setIsSavingDocUpdates(false);
+
+      // From a personnel card: just fix the record and return to the form.
+      if (validityMode === 'fix') return;
 
       await executeSubmission();
     } catch (err: any) {
@@ -1396,9 +1413,9 @@ export function PassSubmissionForm({
           const duplicateSuppApp = applications.find(a => {
             if (isCurrentApp(a)) return false;
             if (a.type !== 'supplementary') return false;
-            if (['rejected', 'cancelled', 'archived', 'completed'].includes(a.status)) return false;
             if (a.locationId !== targetLocId) return false;
-            return a.employeeIds?.includes(empId) && a.employeeStatuses?.[empId] !== 'rejected' && a.employeeStatuses?.[empId] !== 'cancelled';
+            if (!a.employeeIds?.includes(empId)) return false;
+            return isApplicationLineInPipeline(a.status, a.employeeStatuses?.[empId]);
           });
 
           if (duplicateSuppApp) {
@@ -1425,6 +1442,7 @@ export function PassSubmissionForm({
     // Validation: Document Expiry Check (Passport & Visa/QID)
     const docIssues = checkDocumentValidity(data.employeeIds, targetLocId);
     if (docIssues.length > 0) {
+      setValidityMode('submit');
       setValidityIssues(docIssues);
       setIsValidityModalOpen(true);
       return;
@@ -1909,28 +1927,21 @@ export function PassSubmissionForm({
 
                       {/* Live Document Expiry Status Callout */}
                       {(() => {
+                        // Same rule as the submit-time check, so the card warning and the Fix modal always agree.
                         const targetLocId = Object.keys(data.selections)[0] || data.locationId;
-                        const reqExp = parseToYMD(data.individualExpiries[empId]) || parseToYMD(data.selections[targetLocId]?.expiryDate) || parseToYMD(data.expiryDate) || '';
-                        const passExp = parseToYMD(emp?.passportExpiry);
-                        const visaExp = parseToYMD(emp?.qidVisaExpiry || emp?.visaExpiry);
-
-                        let msg = '';
-                        if (!passExp && !visaExp) msg = 'Passport & Visa/QID expiry dates missing';
-                        else if (!passExp) msg = 'Passport expiry date missing';
-                        else if (!visaExp) msg = 'Visa/QID expiry date missing';
-                        else if (reqExp && passExp < reqExp) msg = `Passport expires on ${formatDate(passExp)} (before requested pass expiry)`;
-                        else if (reqExp && visaExp < reqExp) msg = `Visa/QID expires on ${formatDate(visaExp)} (before requested pass expiry)`;
+                        const cardIssues = checkDocumentValidity([empId], targetLocId);
+                        const cardIssue = cardIssues[0];
+                        const msg = cardIssue ? (cardIssue.passportIssue || cardIssue.visaIssue || '') : '';
 
                         if (msg) {
                           return (
                             <div className="mt-1 text-[10px] text-rose-800 bg-rose-50 border border-rose-200 px-2 py-1 rounded-lg flex items-center justify-between">
-                              <span className="truncate pr-1">⚠️ {msg}</span>
+                              <span className="truncate pr-1" title={[cardIssue?.passportIssue, cardIssue?.visaIssue].filter(Boolean).join(' ')}>⚠️ {msg}</span>
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const targetLocId = Object.keys(data.selections)[0] || data.locationId;
-                                  const issues = checkDocumentValidity([empId], targetLocId);
-                                  setValidityIssues(issues);
+                                  setValidityMode('fix');
+                                  setValidityIssues(cardIssues);
                                   setIsValidityModalOpen(true);
                                 }}
                                 className="font-bold text-rose-900 underline hover:text-black ml-1 flex-shrink-0"
@@ -2207,7 +2218,7 @@ export function PassSubmissionForm({
                   <span>Saving & Processing...</span>
                 ) : (
                   <>
-                    <Check size={14} /> Save Document Details & Proceed Submission
+                    <Check size={14} /> {validityMode === 'fix' ? 'Save Document Details' : 'Save Document Details & Proceed Submission'}
                   </>
                 )}
               </button>

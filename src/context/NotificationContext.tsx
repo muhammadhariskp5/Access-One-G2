@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { AppNotification } from '../types';
 import { apiFetch } from '../lib/utils';
+import { onDataChanged, isRealtimeConnected } from '../lib/realtime';
 
 interface BroadcastParams {
   title: string;
@@ -167,7 +168,7 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
     }
   }, [currentUser?.id, soundEnabled, toastAlertsEnabled]);
 
-  // Periodic polling every 12 seconds when tab is active
+  // Notifications are pushed via the realtime feed; no fixed-interval polling
   useEffect(() => {
     if (!currentUser?.id) {
       setNotifications([]);
@@ -178,13 +179,31 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
 
     fetchNotifications();
 
-    const interval = setInterval(() => {
-      if (document.visibilityState === 'visible') {
+    // Pushed by the server when a notification is created for this user (or after a reconnect).
+    let missedWhileHidden = false;
+    const offChange = onDataChanged(resources => {
+      if (!resources.includes('notifications') && !resources.includes('*')) return;
+      if (document.visibilityState === 'visible') fetchNotifications(true);
+      else missedWhileHidden = true;
+    });
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && (missedWhileHidden || !isRealtimeConnected())) {
+        missedWhileHidden = false;
         fetchNotifications(true);
       }
-    }, 12000);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
-    return () => clearInterval(interval);
+    // Slow fallback only while the live connection is down
+    const fallback = setInterval(() => {
+      if (!isRealtimeConnected() && document.visibilityState === 'visible') fetchNotifications(true);
+    }, 120000);
+
+    return () => {
+      offChange();
+      clearInterval(fallback);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [currentUser?.id, fetchNotifications]);
 
   const markAsRead = async (id: string) => {

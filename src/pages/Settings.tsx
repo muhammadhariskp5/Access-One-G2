@@ -154,7 +154,7 @@ export function Settings({
 
   const handleDeleteUser = async (userId: string) => {
     const targetUser = allUsers.find(u => u.id === userId);
-    if (targetUser && (targetUser.role === 'power_admin' || targetUser.email?.toLowerCase() === 'm.techsandgadgets@gmail.com')) {
+    if (targetUser && (targetUser.role === 'power_admin')) {
       showToast("The Master Platform Administrator account is root-protected and cannot be deleted.", "error");
       return;
     }
@@ -195,11 +195,20 @@ export function Settings({
   const handleResetPassword = (userId: string) => {
     showConfirm(
       "Reset Password",
-      "Are you sure you want to reset this user's password to the default 'password123'?",
+      "Reset this user's password? A random temporary password will be generated and shown once.",
       async () => {
         try {
           const res = await apiFetch(`/api/users/${userId}/reset-password`, { method: 'POST' });
           if (res.ok) {
+            const data = await res.json();
+            if (data.temporaryPassword) {
+              try { await navigator.clipboard.writeText(data.temporaryPassword); } catch { /* clipboard unavailable */ }
+              window.alert(`Temporary password (copied to clipboard):
+
+${data.temporaryPassword}
+
+Share it securely; it will not be shown again.`);
+            }
             showToast("Password reset successfully", "success");
           }
         } catch (err: any) {
@@ -211,7 +220,7 @@ export function Settings({
 
   // Filter users - exclude global platform power admin from organization roster
   const orgUsers = useMemo(() => {
-    return allUsers.filter(u => u.role !== 'power_admin' && u.email?.toLowerCase() !== 'm.techsandgadgets@gmail.com');
+    return allUsers.filter(u => u.role !== 'power_admin');
   }, [allUsers]);
 
   const pendingUsers = useMemo(() => {
@@ -584,7 +593,7 @@ export function Settings({
                                 <span>Settings View</span>
                               </button>
 
-                              {user.id !== currentUser?.id && !(user.role === 'power_admin' || user.email?.toLowerCase() === 'm.techsandgadgets@gmail.com') && (
+                              {user.id !== currentUser?.id && !(user.role === 'power_admin') && (
                                 <>
                                   <button 
                                     onClick={() => handleUpdateUserStatus(user.id, user.status === 'active' ? 'inactive' : 'active')}

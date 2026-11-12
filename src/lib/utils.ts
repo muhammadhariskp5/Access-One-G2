@@ -1,6 +1,14 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
+// Random temporary password (12 chars) for new accounts / resets. Never use fixed defaults.
+export function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, b => chars[b % chars.length]).join('');
+}
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -121,12 +129,12 @@ export const isPassInDateRange = (
   return true;
 };
 
+// The session lives in an httpOnly cookie set by the server at login; the browser sends it
+// automatically. X-Requested-With is the CSRF guard the server requires on writes.
 export const apiFetch = async (url: string, options: any = {}) => {
-  const savedUser = localStorage.getItem('user');
-  const user = savedUser ? JSON.parse(savedUser) : null;
   const headers = {
     'Content-Type': 'application/json',
-    'Authorization': user?.token ? `Bearer ${user.token}` : '',
+    'X-Requested-With': 'AccessOne',
     ...options.headers
   };
   

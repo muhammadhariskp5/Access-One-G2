@@ -12,7 +12,7 @@ import {
   Pass, PassApplication, Employee, Location, Category, AccessCode, UserProfile, PassStatus, AppAction 
 } from '../../types';
 import { apiFetch, cn, formatDate, parseToYMD, isPassInDateRange } from '../../lib/utils';
-import { resolvePersonnelStatus, filterPassApplicationItem, getSkippedWorkflowStages } from '../../utils/passStatus';
+import { resolvePersonnelStatus, filterPassApplicationItem, getSkippedWorkflowStages, isHistoryStatus } from '../../utils/passStatus';
 import { StageSkipConfirmModal } from './StageSkipConfirmModal';
 
 export interface PassStatusManagementViewProps {
@@ -121,6 +121,10 @@ export function PassStatusManagementView({
             status = 'rejected';
           } else if (rawEmpStatus === 'active') {
             status = 'active';
+          } else if (rawEmpStatus === 'expired') {
+            status = 'expired';
+          } else if (rawEmpStatus === 'replaced') {
+            status = 'replaced';
           } else {
             status = 'processing';
           }
@@ -167,7 +171,14 @@ export function PassStatusManagementView({
         p.requestId?.toLowerCase().includes(s)
       );
 
-      const matchesStatus = filterPassApplicationItem(p.status, filterStatus);
+      // History (expired/revoked/cancelled/rejected) is kept but only listed when the user
+      // specifically searches for it or explicitly picks that status filter.
+      const historyRequested = s.trim().length >= 2 || (filterStatus && filterStatus !== 'all' && filterStatus !== 'active');
+      if (isHistoryStatus(p.status) && !historyRequested) return false;
+
+      const matchesStatus = s.trim().length >= 2 && isHistoryStatus(p.status) && (!filterStatus || filterStatus === 'all')
+        ? true
+        : filterPassApplicationItem(p.status, filterStatus);
 
       const matchesDate = isPassInDateRange(
         {

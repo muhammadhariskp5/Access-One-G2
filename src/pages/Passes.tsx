@@ -74,7 +74,7 @@ export function Passes({
   const logAction = (action: Omit<AppAction, 'id' | 'timestamp'>) => {
     const newAction: AppAction = {
       ...action,
-      id: Math.random().toString(36).substring(2, 11),
+      id: crypto.randomUUID(),
       timestamp: new Date().toISOString()
     };
     setRecentActions(prev => [newAction, ...prev].slice(0, 5));

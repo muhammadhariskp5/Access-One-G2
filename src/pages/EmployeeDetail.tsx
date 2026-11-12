@@ -8,13 +8,14 @@ import {
 } from 'lucide-react';
 import { Employee, Pass, PassApplication, Location, AccessCode, UserProfile, Division, Department, Project } from '../types';
 import { apiFetch, cn, formatDate } from '../lib/utils';
-import { resolvePersonnelStatus, getApplicationBadgeProps } from '../utils/passStatus';
+import { resolvePersonnelStatus, getApplicationBadgeProps, isHistoryStatus } from '../utils/passStatus';
 import { Modal } from '../components/common/Modal';
 import { EmployeeForm } from '../components/employees/EmployeeForm';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 
 interface EmployeeDetailProps {
   employees: Employee[];
+  applications: PassApplication[];
   passes: Pass[];
   locations: Location[];
   accessCodes: AccessCode[];
@@ -28,8 +29,9 @@ interface EmployeeDetailProps {
 }
 
 export function EmployeeDetail({ 
-  employees, 
-  passes, 
+  employees,
+  applications,
+  passes,
   locations, 
   accessCodes, 
   divisions,
@@ -70,8 +72,23 @@ export function EmployeeDetail({
     fetchDetails();
   }, [id]);
 
-  const employeePasses = detailedData?.passes || passes.filter(p => p.employeeId === id);
-  const employeeApplications = detailedData?.applications || [];
+  const [showHistory, setShowHistory] = useState(false);
+
+  // Passes and applications come from the app-wide lists (kept fresh by the realtime feed), so status
+  // changes appear without a reload and without a second polling loop on this page.
+  const livePasses = passes.filter(p => p.employeeId === id);
+  const allEmployeePasses = livePasses.length > 0 ? livePasses : (detailedData?.passes || []);
+  const liveApplications = applications
+    .filter(a => id && (a.employeeIds || []).includes(id))
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const allEmployeeApplications = liveApplications.length > 0 ? liveApplications : (detailedData?.applications || []);
+
+  // History (expired / replaced / revoked / closed) is retained but shown only on request.
+  const employeePasses = allEmployeePasses.filter(p => showHistory || !isHistoryStatus(p.status));
+  const historyPassCount = allEmployeePasses.filter(p => isHistoryStatus(p.status)).length;
+  const isClosedApp = (a: PassApplication) => isHistoryStatus(a.status) || ['completed', 'collected'].includes((a.status || '').toLowerCase());
+  const employeeApplications = allEmployeeApplications.filter(a => showHistory || !isClosedApp(a));
+  const historyAppCount = allEmployeeApplications.filter(isClosedApp).length;
 
   if (!employee) {
     return (
@@ -243,9 +260,22 @@ export function EmployeeDetail({
 
           {/* Site Engagement & Application History Section */}
           <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#800020]"></div>
-              <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Active Site Passes</p>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-[#800020]"></div>
+                <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">
+                  {showHistory ? 'All Site Passes (incl. History)' : 'Active Site Passes'}
+                </p>
+              </div>
+              {(historyPassCount + historyAppCount) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(v => !v)}
+                  className="text-[10px] font-bold text-[#800020] hover:underline"
+                >
+                  {showHistory ? 'Hide history' : `Show history (${historyPassCount} passes, ${historyAppCount} applications)`}
+                </button>
+              )}
             </div>
             
             <div className="grid grid-cols-1 gap-3">

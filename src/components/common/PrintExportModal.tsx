@@ -147,6 +147,18 @@ export function PrintExportModal({
     setCustomScale(autoFit1PagePercent);
   };
 
+  // The app's compiled stylesheet, inlined so print previews and downloaded HTML render the same
+  // classes without loading anything from a CDN.
+  const collectAppStyles = () => {
+    let css = '';
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        for (const rule of Array.from(sheet.cssRules)) css += rule.cssText + ' ';
+      } catch { /* cross-origin stylesheet: not readable, skip */ }
+    }
+    return `<style>${css}</style>`;
+  };
+
   const getFullPrintHTML = () => {
     const contentHtml = contentRef.current ? contentRef.current.innerHTML : '';
     const scaleFactor = (activeScalePercent / 100).toFixed(2);
@@ -156,7 +168,7 @@ export function PrintExportModal({
         <head>
           <meta charset="utf-8">
           <title>${documentTitle}</title>
-          <script src="https://cdn.tailwindcss.com"></script>
+          ${collectAppStyles()}
           <style>
             @page {
               size: ${pageSize} ${orientation};

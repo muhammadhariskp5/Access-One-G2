@@ -13,6 +13,7 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
   const [data, setData] = useState({
     displayName: user.displayName || '',
     photoURL: user.photoURL || '',
+    currentPassword: '',
     password: '',
     confirmPassword: ''
   });
@@ -23,8 +24,12 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (data.password) {
-      if (data.password.length < 6) {
-        showToast("Password must be at least 6 characters long", 'error');
+      if (!data.currentPassword) {
+        showToast("Enter your current password to set a new one", 'error');
+        return;
+      }
+      if (data.password.length < 8) {
+        showToast("Password must be at least 8 characters long", 'error');
         return;
       }
       if (data.password !== data.confirmPassword) {
@@ -40,7 +45,7 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
         body: JSON.stringify({
           displayName: data.displayName.trim(),
           photoURL: data.photoURL.trim(),
-          ...(data.password ? { password: data.password.trim() } : {})
+          ...(data.password ? { password: data.password.trim(), currentPassword: data.currentPassword } : {})
         })
       });
       
@@ -52,7 +57,7 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
       showToast("Profile and security settings updated successfully", "success");
       const updatedUser = { ...user, displayName: data.displayName, photoURL: data.photoURL };
       localStorage.setItem('user', JSON.stringify(updatedUser));
-      setData(prev => ({ ...prev, password: '', confirmPassword: '' }));
+      setData(prev => ({ ...prev, currentPassword: '', password: '', confirmPassword: '' }));
       onSuccess();
     } catch (err: any) {
       showToast(err.message, 'error');
@@ -106,6 +111,20 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
 
         <div className="space-y-4">
           <div className="space-y-1.5">
+            <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Current Password</label>
+            <div className="relative">
+              <Key className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9CA3AF]" size={18} />
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={data.currentPassword}
+                onChange={e => setData({...data, currentPassword: e.target.value})}
+                className="w-full pl-12 pr-4 py-2.5 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-xs bg-white font-mono"
+                placeholder="Required only when changing your password"
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
             <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">New Password</label>
             <div className="relative">
               <Key className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9CA3AF]" size={18} />
@@ -114,7 +133,7 @@ export function ProfileForm({ user, onSuccess, showToast }: ProfileFormProps) {
                 value={data.password} 
                 onChange={e => setData({...data, password: e.target.value})} 
                 className="w-full pl-12 pr-10 py-2.5 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-xs bg-white font-mono" 
-                placeholder="Leave blank to keep current (min 6 chars)"
+                placeholder="Leave blank to keep current (min 8 chars)"
               />
               <button
                 type="button"

@@ -253,15 +253,22 @@ export function getApplicationBadgeProps(status?: string, _totalPersonnel = 1) {
         bg: 'bg-gray-100 text-gray-700 border-gray-300' 
       };
     case 'replaced':
-      return { 
-        label: 'Replaced', 
+      return {
+        label: 'Replaced',
         badgeClass: 'bg-gray-100 text-gray-600 border border-gray-300',
         text: 'Replaced',
-        bg: 'bg-gray-100 text-gray-600 border-gray-300' 
+        bg: 'bg-gray-100 text-gray-600 border-gray-300'
+      };
+    case 'expired':
+      return {
+        label: 'Expired (Closed)',
+        badgeClass: 'bg-orange-50 text-orange-800 border border-orange-200',
+        text: 'Expired',
+        bg: 'bg-orange-50 text-orange-800 border-orange-200'
       };
     default:
-      return { 
-        label: 'Under Review (Stage 1)', 
+      return {
+        label: 'Under Review (Stage 1)',
         badgeClass: 'bg-gray-50 text-gray-700 border border-gray-200',
         text: 'Under Review',
         bg: 'bg-gray-50 text-gray-700 border-gray-200' 
@@ -357,6 +364,8 @@ export function getWorkflowStageInfo(status: string = 'pending'): WorkflowStageI
       return { stageNumber: 0, stageName: 'Cancelled Application', stepName: 'CANCELLED', orderRank: 0, badgeColor: 'bg-rose-100 text-rose-800 border-rose-200' };
     case 'replaced':
       return { stageNumber: 0, stageName: 'Replaced Pass', stepName: 'REPLACED', orderRank: 0, badgeColor: 'bg-gray-100 text-gray-600 border-gray-300' };
+    case 'expired':
+      return { stageNumber: 0, stageName: 'Expired – Closed', stepName: 'EXPIRED', orderRank: 0, badgeColor: 'bg-orange-100 text-orange-800 border-orange-200' };
     default:
       return { stageNumber: 0, stageName: 'Terminal Status', stepName: (s || 'TERMINAL').toUpperCase(), orderRank: 0, badgeColor: 'bg-rose-100 text-rose-800 border-rose-200' };
   }
@@ -421,7 +430,7 @@ export function computeApplicationRollupStatus(
 ): string {
   const lowerStatus = (currentStatus || '').toLowerCase();
   
-  if (lowerStatus === 'archived' || lowerStatus === 'rejected' || lowerStatus === 'cancelled' || lowerStatus === 'replaced') {
+  if (lowerStatus === 'archived' || lowerStatus === 'rejected' || lowerStatus === 'cancelled' || lowerStatus === 'replaced' || lowerStatus === 'expired') {
     return lowerStatus;
   }
 
@@ -450,6 +459,39 @@ export function computeApplicationRollupStatus(
   }
 
   return currentStatus;
+}
+
+/**
+ * Lifecycle rule for duplicate-application checks.
+ * An application line blocks a new application for the same person ONLY while it is still
+ * in the pipeline (before a pass is issued). Once a pass has been issued, the PASS governs
+ * (active pass check + 45-day renewal window); once the pass ends, nothing blocks.
+ */
+const PRE_ISSUE_LINE_STATUSES = [
+  'pending', 'under_review', 'review', 'processing', 'under_processing',
+  'forwarded', 'clarification', 'approved', 'accepted'
+];
+const CLOSED_APPLICATION_STATUSES = [
+  'rejected', 'cancelled', 'archived', 'expired', 'replaced', 'completed', 'collected', 'revoked'
+];
+
+export function isApplicationLineInPipeline(
+  appStatus: string | undefined,
+  employeeLineStatus: string | undefined
+): boolean {
+  const app = (appStatus || '').toLowerCase();
+  if (CLOSED_APPLICATION_STATUSES.includes(app)) return false;
+  const line = (employeeLineStatus || '').toLowerCase();
+  if (line) return PRE_ISSUE_LINE_STATUSES.includes(line);
+  // No per-person status recorded: fall back to the application's own stage
+  return PRE_ISSUE_LINE_STATUSES.includes(app) || app === 'partially_issued';
+}
+
+/** Pass/application statuses that are history (no longer grant access or in progress). */
+export const HISTORY_STATUSES = ['expired', 'replaced', 'superseded', 'revoked', 'cancelled', 'rejected', 'archived', 'inactive', 'deleted'];
+
+export function isHistoryStatus(status?: string): boolean {
+  return HISTORY_STATUSES.includes((status || '').toLowerCase());
 }
 
 /**

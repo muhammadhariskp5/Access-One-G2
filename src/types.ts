@@ -63,8 +63,8 @@ export interface AccessCode {
 
 export type PassType = 'main' | 'supplementary';
 export type PassStatus = 'pending' | 'processing' | 'approved' | 'accepted' | 'issued' | 'collected' | 'cancelled' | 'rejected' | 'active' | 'expired' | 'revoked' | 'completed' | 'replaced';
-export type ApplicationStatus = 'pending' | 'processing' | 'under_review' | 'under_processing' | 'approved' | 'accepted' | 'issued' | 'partially_issued' | 'collected' | 'cancelled' | 'rejected' | 'forwarded' | 'completed' | 'archived' | 'clarification' | 'replaced';
-export type EmployeeApplicationStatus = 'pending' | 'processing' | 'approved' | 'accepted' | 'issued' | 'collected' | 'cancelled' | 'rejected' | 'completed' | 'clarification' | 'replaced';
+export type ApplicationStatus = 'pending' | 'processing' | 'under_review' | 'under_processing' | 'approved' | 'accepted' | 'issued' | 'partially_issued' | 'collected' | 'cancelled' | 'rejected' | 'forwarded' | 'completed' | 'archived' | 'clarification' | 'replaced' | 'expired';
+export type EmployeeApplicationStatus = 'pending' | 'processing' | 'approved' | 'accepted' | 'issued' | 'collected' | 'cancelled' | 'rejected' | 'completed' | 'clarification' | 'replaced' | 'expired';
 
 export interface PassApplication {
   id: string;
@@ -142,8 +142,7 @@ export function isPowerAdmin(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
   const email = (user.email || '').toLowerCase().trim();
   return (
-    user.role === 'power_admin' || 
-    email === 'm.techsandgadgets@gmail.com'
+    user.role === 'power_admin'
   );
 }
 
