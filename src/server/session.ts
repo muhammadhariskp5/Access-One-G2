@@ -4,8 +4,12 @@ import { debugLog } from './log.ts';
 // --- Signed Session Token Helpers (added by security audit fix) ---
 // Client identity must never be trusted directly from request headers; it must come from
 // a token that was signed by this server at login time and verified on every request.
+// Production must have a stable secret (otherwise every restart logs everyone out); refuse to start.
+if (!process.env.SESSION_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('SESSION_SECRET is not set. Add a long random SESSION_SECRET to .env.');
+}
 export const SESSION_SECRET = process.env.SESSION_SECRET || (() => {
-  debugLog('WARNING: SESSION_SECRET env var not set. Using an ephemeral secret for this process only; all sessions will be invalidated on restart. Set SESSION_SECRET in your environment for production use.');
+  debugLog('WARNING: SESSION_SECRET env var not set. Using an ephemeral secret for this process only (development only).');
   return crypto.randomBytes(32).toString('hex');
 })();
 
