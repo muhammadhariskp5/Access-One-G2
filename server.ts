@@ -598,7 +598,18 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     };
 
     const normalizeDateStr = (d: any): string | null => {
-      if (!d) return null;
+      if (d === null || d === undefined || d === '') return null;
+      // Real calendar date check (rejects 31/02, month 13, ...)
+      const valid = (y: number, m: number, day: number) => {
+        const t = new Date(Date.UTC(y, m - 1, day));
+        return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === day;
+      };
+      // Excel stores dates as serial day numbers (1 = 1900-01-01, epoch 1899-12-30)
+      const serial = typeof d === 'number' ? d : (/^\d{5}(\.\d+)?$/.test(String(d).trim()) ? Number(String(d).trim()) : NaN);
+      if (Number.isFinite(serial) && serial > 20000 && serial < 80000) {
+        const t = new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000);
+        return t.toISOString().substring(0, 10);
+      }
       if (d instanceof Date) {
         if (isNaN(d.getTime())) return null;
         const y = d.getFullYear();
@@ -609,20 +620,17 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       const str = String(d).trim();
       if (!str) return null;
       
-      const ymdMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+      const ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
       if (ymdMatch) {
-        const y = ymdMatch[1];
-        const m = ymdMatch[2].padStart(2, '0');
-        const day = ymdMatch[3].padStart(2, '0');
-        return `${y}-${m}-${day}`;
+        if (!valid(+ymdMatch[1], +ymdMatch[2], +ymdMatch[3])) return null;
+        return `${ymdMatch[1]}-${ymdMatch[2].padStart(2, '0')}-${ymdMatch[3].padStart(2, '0')}`;
       }
 
-      const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+      // Day-first (DD/MM/YYYY), the local convention
+      const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
       if (dmyMatch) {
-        const day = dmyMatch[1].padStart(2, '0');
-        const m = dmyMatch[2].padStart(2, '0');
-        const y = dmyMatch[3];
-        return `${y}-${m}-${day}`;
+        if (!valid(+dmyMatch[3], +dmyMatch[2], +dmyMatch[1])) return null;
+        return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
       }
 
       const parsed = new Date(str);

@@ -14,7 +14,7 @@ import type { RouteContext } from "../context.ts";
 
 // employees routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) {
-  const { oracledb, logAction, authorize, validateEmployeeReferences, getConnection, toCamelCase, toOracleKeys, getTenantOrgId } = ctx;
+  const { oracledb, logAction, authorize, validateEmployeeReferences, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, normalizeDateStr } = ctx;
   // --- Data Endpoints ---
   app.get("/api/employees", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
@@ -200,8 +200,9 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         return res.status(400).json({ error: "Expected an array of employees" });
       }
 
-      const { orgId } = await getTenantOrgId(req, connection);
+      const { orgId, isPowerAdmin } = await getTenantOrgId(req, connection);
       const effectiveOrgId = (req.headers['x-user-org-id'] as string) || orgId || 'org-habari';
+      const IMPORT_DATE_FIELDS = ['passportExpiry', 'visaExpiry', 'qidVisaExpiry', 'safetyInductionDate', 'birthDate'];
 
       // Check maxEmployees quota
       const orgRes = await connection.execute(
@@ -243,7 +244,24 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
       const toInsert: any[] = [];
 
       for (const empData of employees) {
-        const itemOrgId = empData.organizationId || effectiveOrgId;
+        // Only a power admin may import into another organization; everyone else imports into their own.
+        const itemOrgId = (isPowerAdmin && empData.organizationId) ? empData.organizationId : effectiveOrgId;
+
+        // Dates arrive in whatever format the spreadsheet used: store them as YYYY-MM-DD, and skip
+        // (and report) a row whose date can't be read rather than storing an unusable value.
+        const badDate = IMPORT_DATE_FIELDS.find(f => {
+          const raw = empData[f];
+          if (raw === undefined || raw === null || String(raw).trim() === '') return false;
+          const iso = normalizeDateStr(raw);
+          if (!iso) return true;
+          empData[f] = iso;
+          return false;
+        });
+        if (badDate) {
+          results.skipped++;
+          results.duplicates.push(`${empData.firstName || ''} ${empData.lastName || ''} - Error: unreadable date in ${badDate} ("${empData[badDate]}")`);
+          continue;
+        }
         // Selection only check
         try {
           await validateEmployeeReferences(connection, empData, itemOrgId);
