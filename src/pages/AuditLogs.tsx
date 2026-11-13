@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Shield, 
@@ -25,11 +25,11 @@ import {
   Radio
 } from 'lucide-react';
 import { cn, formatDateTime, apiFetch } from '../lib/utils';
+import { onDataChanged } from '../lib/realtime';
 import { AuditLog, UserProfile, Division, Project, Department } from '../types';
 import { UserSettingsModal } from '../components/settings/UserSettingsModal';
 
 interface AuditLogsProps {
-  logs: AuditLog[];
   globalSearch: string;
   allUsers?: UserProfile[];
   currentUser?: UserProfile | null;
@@ -37,13 +37,11 @@ interface AuditLogsProps {
   projects?: Project[];
   departments?: Department[];
   onSuccess?: () => void;
-  onRefreshAuditLogs?: () => Promise<any> | void;
   showToast?: (msg: string, type?: 'success' | 'error') => void;
   showConfirm?: (title: string, message: string, onConfirm: () => void) => void;
 }
 
 export function AuditLogs({ 
-  logs: recentLogs, 
   globalSearch,
   allUsers = [],
   currentUser = null,
@@ -51,21 +49,49 @@ export function AuditLogs({
   projects = [],
   departments = [],
   onSuccess = () => {},
-  onRefreshAuditLogs,
   showToast = () => {},
   showConfirm = () => {}
 }: AuditLogsProps) {
   const navigate = useNavigate();
 
-  // The app keeps only the newest page of audit entries; older pages are loaded on demand.
+  // This page loads the audit trail itself (nothing is downloaded until it is opened): the newest
+  // page first, older pages on demand, and refreshes fetch only entries newer than the newest
+  // shown — usually none.
   const AUDIT_PAGE_SIZE = 500;
-  const [olderLogs, setOlderLogs] = useState<AuditLog[]>([]);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
   const [hasOlder, setHasOlder] = useState(true);
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
-  const logs = useMemo(() => {
-    const seen = new Set<string>();
-    return [...recentLogs, ...olderLogs].filter(l => (seen.has(l.id) ? false : (seen.add(l.id), true)));
-  }, [recentLogs, olderLogs]);
+  const logsRef = useRef<AuditLog[]>([]);
+  logsRef.current = logs;
+
+  const refreshNewest = useCallback(async () => {
+    const newest = logsRef.current[0]?.timestamp;
+    const res = await apiFetch(newest
+      ? `/api/auditLogs?limit=${AUDIT_PAGE_SIZE}&since=${encodeURIComponent(newest)}`
+      : `/api/auditLogs?limit=${AUDIT_PAGE_SIZE}`);
+    if (!res.ok) throw new Error('Failed to load audit trail');
+    const page: AuditLog[] = await res.json();
+    if (!newest || page.length >= AUDIT_PAGE_SIZE) {
+      // First load, or more new entries than one page: start again from the newest page
+      setLogs(page);
+      setHasOlder(page.length >= AUDIT_PAGE_SIZE);
+      return;
+    }
+    setLogs(prev => {
+      const have = new Set(prev.map(l => l.id));
+      const fresh = page.filter(l => !have.has(l.id));
+      return fresh.length ? [...fresh, ...prev] : prev;
+    });
+  }, []);
+
+  // Initial load, and live updates when someone else's action is recorded
+  useEffect(() => {
+    refreshNewest().catch(e => showToast(e?.message || 'Failed to load audit trail', 'error'));
+    return onDataChanged(resources => {
+      if (resources.includes('auditLogs')) refreshNewest().catch(() => { /* next refresh retries */ });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNewest]);
 
   const loadOlderLogs = async () => {
     const oldest = logs[logs.length - 1]?.timestamp;
@@ -74,7 +100,10 @@ export function AuditLogs({
     try {
       const res = await apiFetch(`/api/auditLogs?limit=${AUDIT_PAGE_SIZE}&before=${encodeURIComponent(oldest)}`);
       const page: AuditLog[] = res.ok ? await res.json() : [];
-      setOlderLogs(prev => [...prev, ...page]);
+      setLogs(prev => {
+        const have = new Set(prev.map(l => l.id));
+        return [...prev, ...page.filter(l => !have.has(l.id))];
+      });
       if (page.length < AUDIT_PAGE_SIZE) setHasOlder(false);
     } catch (e: any) {
       showToast(e?.message || 'Failed to load older entries', 'error');
@@ -197,11 +226,7 @@ export function AuditLogs({
   const handleManualRefresh = async (notify: boolean = true) => {
     setIsRefreshing(true);
     try {
-      if (onRefreshAuditLogs) {
-        await onRefreshAuditLogs();
-      } else {
-        await onSuccess();
-      }
+      await refreshNewest();
       setLastRefreshedAt(new Date());
       if (notify) {
         showToast('Audit trail updated', 'success');
@@ -247,7 +272,7 @@ export function AuditLogs({
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [isAutoRefresh, onRefreshAuditLogs, onSuccess]);
+  }, [isAutoRefresh, refreshNewest]);
 
   // Dedicated single-endpoint live polling loop
   useEffect(() => {
@@ -257,11 +282,7 @@ export function AuditLogs({
       if (document.visibilityState === 'visible') {
         setIsRefreshing(true);
         try {
-          if (onRefreshAuditLogs) {
-            await onRefreshAuditLogs();
-          } else {
-            await onSuccess();
-          }
+          await refreshNewest();
           setLastRefreshedAt(new Date());
         } catch (e) {
           console.error("Auto refresh error:", e);
@@ -272,7 +293,7 @@ export function AuditLogs({
     }, refreshInterval * 1000);
 
     return () => clearInterval(interval);
-  }, [isAutoRefresh, isTabVisible, refreshInterval, onRefreshAuditLogs, onSuccess]);
+  }, [isAutoRefresh, isTabVisible, refreshInterval, refreshNewest]);
 
   // Open User Settings Modal
   const handleOpenUserSettings = (userIdOrEmail: string, userName?: string) => {

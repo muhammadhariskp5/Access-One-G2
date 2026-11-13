@@ -8,6 +8,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees } from "./src/server/requestLinks.ts";
+import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches, clearDanglingMainPassLinks } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
@@ -1710,6 +1711,12 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
           }
         }
       }
+    },
+    {
+      // Delta list refresh: the database stamps syncAt on every change to employees, passes and
+      // applications, so browsers fetch only what changed instead of whole lists.
+      id: '2026-11-13-sync-stamps',
+      run: async (conn) => { await installSyncStamps(conn, getDbEngine()); }
     }
   ];
 
@@ -1747,6 +1754,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
   (async () => {
     try { await dbReady; } catch { /* logged above */ }
     await runDataMigrations();
+    try {
+      const c = await getConnection();
+      try { await checkSyncStamps(c, getDbEngine()); } finally { await c.close(); }
+    } catch (err) { logger.error('[Sync] startup check failed', { err: err }); }
     await runDailyLifecycle(businessToday());
     scheduleDailyLifecycle();
     startupComplete = true;

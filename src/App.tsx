@@ -16,7 +16,6 @@ import {
   UserRole,
   BrandingSettings,
   PassApplication,
-  AuditLog,
   Division,
   Project,
   Department,
@@ -45,6 +44,23 @@ const AuditLogs = lazy(() => import('./pages/AuditLogs').then(m => ({ default: m
 const EmployeeDetail = lazy(() => import('./pages/EmployeeDetail').then(m => ({ default: m.EmployeeDetail })));
 const ApplicationDetail = lazy(() => import('./pages/ApplicationDetail').then(m => ({ default: m.ApplicationDetail })));
 const SaaSAdminPortal = lazy(() => import('./pages/SaaSAdminPortal').then(m => ({ default: m.SaaSAdminPortal })));
+
+const ALL_RESOURCES = ['employees', 'passes', 'passApplications', 'locations', 'categories', 'accessCodes', 'company', 'users', 'divisions', 'projects', 'departments'];
+
+// Apply a delta to a list: changed rows replace their old version in place, new rows go first,
+// removed (deleted / replaced) rows drop out. Unchanged lists keep their identity (no re-render).
+function mergeDelta<T extends { id: string }>(prev: T[], items: T[], removed: string[]): T[] {
+  if (items.length === 0 && removed.length === 0) return prev;
+  const gone = new Set(removed);
+  const changed = new Map(items.map(i => [i.id, i]));
+  const kept = prev.filter(x => !gone.has(x.id)).map(x => {
+    const next = changed.get(x.id);
+    if (!next) return x;
+    changed.delete(x.id);
+    return next;
+  });
+  return [...changed.values(), ...kept];
+}
 const NotificationsPage = lazy(() => import('./pages/Notifications').then(m => ({ default: m.NotificationsPage })));
 import { NotificationProvider } from './context/NotificationContext';
 import { InAppNotificationToast } from './components/notifications/InAppNotificationToast';
@@ -80,7 +96,6 @@ export default function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [accessCodes, setAccessCodes] = useState<AccessCode[]>([]);
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -224,13 +239,14 @@ export default function App() {
   // --- Data Fetching ---
   const hadDataErrorRef = useRef(false);
   const fetchSeqRef = useRef(0);
+  const syncCursorsRef = useRef<Record<string, string | null>>({ employees: null, passes: null, passApplications: null });
   const activeAbortControllerRef = useRef<AbortController | null>(null);
 
-  const safeFetch = async (url: string, fallback: any, signal?: AbortSignal): Promise<{ value: any; ok: boolean }> => {
+  const safeFetch = async (url: string, fallback: any, signal?: AbortSignal): Promise<{ value: any; ok: boolean; cursor?: string | null; status?: number }> => {
     try {
       const r = await apiFetch(url, signal ? { signal } : {});
-      if (r.ok) return { value: await r.json(), ok: true };
-      return { value: fallback, ok: false };
+      if (r.ok) return { value: await r.json(), ok: true, cursor: r.headers.get('X-Sync-Cursor'), status: r.status };
+      return { value: fallback, ok: false, status: r.status };
     } catch (e: any) {
       if (e?.name === 'AbortError') throw e;
       return { value: fallback, ok: false };
@@ -259,15 +275,21 @@ export default function App() {
         safeFetch('/api/accessCodes', [], abortController.signal),
         safeFetch('/api/settings/company', null, abortController.signal),
         safeFetch('/api/users', [], abortController.signal),
-        safeFetch('/api/auditLogs', [], abortController.signal),
         safeFetch('/api/divisions', [], abortController.signal),
         safeFetch('/api/projects', [], abortController.signal),
         safeFetch('/api/departments', [], abortController.signal)
       ]);
-      const [emps, pss, reqs, locs, cats, grps, comp, usrs, logs, divs, projs, depts] = results.map(r => r.value);
+      const [emps, pss, reqs, locs, cats, grps, comp, usrs, divs, projs, depts] = results.map(r => r.value);
       const hadError = results.some(r => !r.ok);
 
       if (mySeq !== fetchSeqRef.current || abortController.signal.aborted) return; // a newer fetch has started or this was aborted
+
+      // Where to resume from on the next (delta) refresh of the big lists
+      syncCursorsRef.current = {
+        employees: results[0].ok ? results[0].cursor || null : null,
+        passes: results[1].ok ? results[1].cursor || null : null,
+        passApplications: results[2].ok ? results[2].cursor || null : null,
+      };
 
       setEmployees(Array.isArray(emps) ? emps : []);
       setPasses(Array.isArray(pss) ? pss : []);
@@ -277,7 +299,6 @@ export default function App() {
       setAccessCodes(Array.isArray(grps) ? grps : []);
       setCompany(comp && typeof comp === 'object' && !Array.isArray(comp) ? comp : null);
       setAllUsers(Array.isArray(usrs) ? usrs : []);
-      setAuditLogs(Array.isArray(logs) ? logs : []);
       setDivisions(Array.isArray(divs) ? divs : []);
       setProjects(Array.isArray(projs) ? projs : []);
       setDepartments(Array.isArray(depts) ? depts : []);
@@ -308,22 +329,6 @@ export default function App() {
     }
   };
 
-  // Targeted single-endpoint fetch for audit logs (prevents refetching all 12 collections)
-  const fetchAuditLogs = async () => {
-    if (!user) return;
-    try {
-      const res = await apiFetch('/api/auditLogs');
-      if (res.ok) {
-        const logs = await res.json();
-        setAuditLogs(Array.isArray(logs) ? logs : []);
-        return logs;
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError') return;
-      console.error("Failed to fetch audit logs:", err);
-    }
-  };
-
   // New-version notice: the server announces its deployed build; if this tab runs an older one,
   // offer a reload (not automatic, so nobody loses a half-filled form).
   const [newVersionAvailable, setNewVersionAvailable] = useState(false);
@@ -335,9 +340,16 @@ export default function App() {
   const fetchDataRef = useRef(fetchData);
   fetchDataRef.current = fetchData;
 
-  // Refetch only the named lists (used by the realtime change feed)
+  // Refetch only the named lists (used by the realtime change feed and after saves). The big
+  // lists (employees, passes, applications) are refreshed as deltas: only rows changed since the
+  // last fetch are downloaded and merged in. If the server can't do that, the whole list is fetched.
   const fetchResources = async (resources: string[]) => {
     if (!user) return;
+    const deltaSetters: Record<string, React.Dispatch<React.SetStateAction<any[]>>> = {
+      employees: setEmployees as any,
+      passes: setPasses as any,
+      passApplications: setApplications as any,
+    };
     const endpoints: Record<string, [string, any, (v: any) => void]> = {
       employees: ['/api/employees', [], v => setEmployees(Array.isArray(v) ? v : [])],
       passes: ['/api/passes', [], v => setPasses(Array.isArray(v) ? v : [])],
@@ -347,17 +359,35 @@ export default function App() {
       accessCodes: ['/api/accessCodes', [], v => setAccessCodes(Array.isArray(v) ? v : [])],
       company: ['/api/settings/company', null, v => { if (v && typeof v === 'object' && !Array.isArray(v)) setCompany(v); }],
       users: ['/api/users', [], v => setAllUsers(Array.isArray(v) ? v : [])],
-      auditLogs: ['/api/auditLogs', [], v => setAuditLogs(Array.isArray(v) ? v : [])],
       divisions: ['/api/divisions', [], v => setDivisions(Array.isArray(v) ? v : [])],
       projects: ['/api/projects', [], v => setProjects(Array.isArray(v) ? v : [])],
       departments: ['/api/departments', [], v => setDepartments(Array.isArray(v) ? v : [])],
     };
     await Promise.all(resources.filter(r => endpoints[r]).map(async r => {
       const [url, fallback, apply] = endpoints[r];
+      const cursor = syncCursorsRef.current[r];
+      if (deltaSetters[r] && cursor) {
+        const delta = await safeFetch(`${url}?since=${encodeURIComponent(cursor)}`, null);
+        const body = delta.value;
+        if (delta.ok && body && Array.isArray(body.items) && Array.isArray(body.removed)) {
+          syncCursorsRef.current[r] = body.cursor || cursor;
+          deltaSetters[r](prev => mergeDelta(prev, body.items, body.removed));
+          return;
+        }
+        syncCursorsRef.current[r] = null; // fall back to a full download below
+      }
       const result = await safeFetch(url, fallback);
-      if (result.ok) apply(result.value);
+      if (result.ok) {
+        apply(result.value);
+        if (deltaSetters[r]) syncCursorsRef.current[r] = result.cursor || null;
+      }
     }));
   };
+
+  // Every list, big ones as deltas: after a save, and as the fallback when live updates are down
+  const refreshAll = () => fetchResources(ALL_RESOURCES);
+  const refreshAllRef = useRef(refreshAll);
+  refreshAllRef.current = refreshAll;
   const fetchResourcesRef = useRef(fetchResources);
   fetchResourcesRef.current = fetchResources;
 
@@ -384,7 +414,7 @@ export default function App() {
       if (document.visibilityState !== 'visible' || pending.size === 0) return;
       const list = Array.from(pending);
       pending.clear();
-      if (list.includes('*')) fetchDataRef.current();
+      if (list.includes('*')) refreshAllRef.current();
       else fetchResourcesRef.current(list);
     };
 
@@ -403,7 +433,7 @@ export default function App() {
 
     const FALLBACK_MS = 120000;
     const fallback = setInterval(() => {
-      if (!isRealtimeConnected() && document.visibilityState === 'visible') fetchDataRef.current();
+      if (!isRealtimeConnected() && document.visibilityState === 'visible') refreshAllRef.current();
     }, FALLBACK_MS);
 
     return () => {
@@ -530,6 +560,7 @@ export default function App() {
   }, [navigate, user]);
 
   const clearUserDataState = () => {
+    syncCursorsRef.current = { employees: null, passes: null, passApplications: null };
     // Invalidate and cancel any ongoing asynchronous network fetches
     fetchSeqRef.current++;
     if (activeAbortControllerRef.current) {
@@ -544,7 +575,6 @@ export default function App() {
     setAccessCodes([]);
     setCompany(null);
     setAllUsers([]);
-    setAuditLogs([]);
     setDivisions([]);
     setProjects([]);
     setDepartments([]);
@@ -832,7 +862,7 @@ export default function App() {
                     departments={departments}
                     allUsers={allUsers}
                     currentUser={user}
-                    onSuccess={fetchData}
+                    onSuccess={refreshAll}
                     globalSearch={globalSearch}
                     showToast={showToast}
                     showConfirm={showConfirm}
@@ -855,7 +885,7 @@ export default function App() {
                     departments={departments}
                     allUsers={allUsers}
                     currentUser={user}
-                    onSuccess={fetchData}
+                    onSuccess={refreshAll}
                     globalSearch={globalSearch}
                     showToast={showToast}
                     showConfirm={showConfirm}
@@ -879,7 +909,7 @@ export default function App() {
                     departments={departments}
                     allUsers={allUsers}
                     currentUser={user}
-                    onSuccess={fetchData}
+                    onSuccess={refreshAll}
                     globalSearch={globalSearch}
                     showToast={showToast}
                     showConfirm={showConfirm}
@@ -908,7 +938,7 @@ export default function App() {
                   divisions={divisions}
                   departments={departments}
                   projects={projects}
-                  onSuccess={fetchData}
+                  onSuccess={refreshAll}
                   globalSearch={globalSearch}
                   currentUser={user}
                   showToast={showToast}
@@ -926,7 +956,7 @@ export default function App() {
                   departments={departments}
                   projects={projects}
                   currentUser={user}
-                  onSuccess={fetchData}
+                  onSuccess={refreshAll}
                   showToast={showToast}
                   showConfirm={showConfirm}
                 />
@@ -941,7 +971,7 @@ export default function App() {
                   projects={projects}
                   globalSearch={globalSearch}
                   currentUser={user}
-                  onSuccess={fetchData}
+                  onSuccess={refreshAll}
                   showToast={showToast}
                   showConfirm={showConfirm}
                 />
@@ -954,7 +984,7 @@ export default function App() {
                   divisions={divisions}
                   projects={projects}
                   departments={departments}
-                  onSuccess={fetchData}
+                  onSuccess={refreshAll}
                   globalSearch={globalSearch}
                   showToast={showToast}
                   showConfirm={showConfirm}
@@ -963,15 +993,13 @@ export default function App() {
               <Route path="/audit" element={
                 user.role === 'admin' ? (
                   <AuditLogs 
-                    logs={auditLogs} 
                     globalSearch={globalSearch}
                     allUsers={allUsers}
                     currentUser={user}
                     divisions={divisions}
                     projects={projects}
                     departments={departments}
-                    onSuccess={fetchData}
-                    onRefreshAuditLogs={fetchAuditLogs}
+                    onSuccess={refreshAll}
                     showToast={showToast}
                     showConfirm={showConfirm}
                   />
@@ -997,7 +1025,7 @@ export default function App() {
           departments={departments}
           projects={projects}
           onClose={() => setIsEmployeeModalOpen(false)} 
-          onSuccess={fetchData} 
+          onSuccess={refreshAll} 
         />
       </Modal>
 
@@ -1006,7 +1034,7 @@ export default function App() {
           mode={locationModalMode}
           categories={categories} 
           onClose={() => setIsLocationModalOpen(false)} 
-          onSuccess={fetchData} 
+          onSuccess={refreshAll} 
           showToast={showToast}
         />
       </Modal>
@@ -1018,7 +1046,7 @@ export default function App() {
           locations={locations}
           categories={categories}
           onClose={() => setIsCodeModalOpen(false)} 
-          onSuccess={fetchData} 
+          onSuccess={refreshAll} 
           showToast={showToast}
         />
       </Modal>

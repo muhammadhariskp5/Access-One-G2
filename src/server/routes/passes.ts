@@ -14,6 +14,7 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
+import { respondDelta } from "../syncStamp.ts";
 
 // passes routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
@@ -45,6 +46,14 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit });
       }
 
+      const mapPass = (p: any) => ({
+        ...toCamelCase(p),
+        accessCodes: JSON.parse(p.ACCESSCODES || '[]'),
+        authorityAppNumber: p.AUTHORITYAPPNUMBER
+      });
+      // Delta refresh (?since=cursor): only rows changed since the browser's last fetch
+      if (await respondDelta(req, res, connection, 'passes', orgId || null, mapPass)) return;
+
       let sql = `SELECT * FROM passes WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId) {
@@ -55,14 +64,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
 
       const result = await connection.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT });
 
-      const passes = result.rows?.map((p: any) => {
-        const camel = toCamelCase(p);
-        return {
-          ...camel,
-          accessCodes: JSON.parse(p.ACCESSCODES || '[]'),
-          authorityAppNumber: p.AUTHORITYAPPNUMBER
-        };
-      }) || [];
+      const passes = result.rows?.map(mapPass) || [];
 
       res.json(passes);
     } catch (err) {

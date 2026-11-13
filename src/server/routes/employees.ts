@@ -11,6 +11,7 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
+import { respondDelta } from "../syncStamp.ts";
 import { parseEmployeeListQuery, buildEmployeeFilter, orderBy, pageClause, duplicateReasonsFor, countDuplicates, EMPLOYEE_EXPORT_MAX } from "../employeeQuery.ts";
 
 // employees routes (moved verbatim from server.ts; shared helpers come from the route context)
@@ -44,6 +45,9 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         const duplicateCount = await countDuplicates(connection, orgId || null);
         return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit, duplicateCount });
       }
+
+      // Delta refresh (?since=cursor): only rows changed since the browser's last fetch
+      if (await respondDelta(req, res, connection, 'employees', orgId || null, toCamelCase)) return;
 
       let sql = `SELECT * FROM employees WHERE deletedAt IS NULL`;
       const binds: any = {};

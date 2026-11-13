@@ -13,6 +13,7 @@ import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
 import { pageClause } from "../employeeQuery.ts";
+import { respondDelta } from "../syncStamp.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
 
 // applications routes (moved verbatim from server.ts; shared helpers come from the route context)
@@ -54,6 +55,18 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit, activeCount, archivedCount });
       }
 
+      const mapRequest = (r: any) => ({
+        ...toCamelCase(r),
+        employeeIds: JSON.parse(r.EMPLOYEEIDS || '[]'),
+        employeeStatuses: JSON.parse(r.EMPLOYEESTATUSES || '{}'),
+        temporaryNames: JSON.parse(r.TEMPORARYNAMES || '[]'),
+        accessCodes: JSON.parse(r.ACCESSCODES || '[]'),
+        individualExpiries: JSON.parse(r.INDIVIDUALEXPIRIES || '{}'),
+        individualStartDates: JSON.parse(r.INDIVIDUALSTARTDATES || '{}')
+      });
+      // Delta refresh (?since=cursor): only rows changed since the browser's last fetch
+      if (await respondDelta(req, res, connection, 'passRequests', orgId || null, mapRequest)) return;
+
       let sql = `SELECT * FROM passRequests WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId) {
@@ -64,18 +77,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
 
       const result = await connection.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT });
 
-      const requests = result.rows?.map((r: any) => {
-        const camel = toCamelCase(r);
-        return {
-          ...camel,
-          employeeIds: JSON.parse(r.EMPLOYEEIDS || '[]'),
-          employeeStatuses: JSON.parse(r.EMPLOYEESTATUSES || '{}'),
-          temporaryNames: JSON.parse(r.TEMPORARYNAMES || '[]'),
-          accessCodes: JSON.parse(r.ACCESSCODES || '[]'),
-          individualExpiries: JSON.parse(r.INDIVIDUALEXPIRIES || '{}'),
-          individualStartDates: JSON.parse(r.INDIVIDUALSTARTDATES || '{}')
-        };
-      }) || [];
+      const requests = result.rows?.map(mapRequest) || [];
 
       res.json(requests);
     } catch (err) {

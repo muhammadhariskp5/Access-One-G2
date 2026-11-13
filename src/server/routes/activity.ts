@@ -59,6 +59,12 @@ export function registerActivityRoutes(app: express.Express, ctx: RouteContext) 
           sql += ` AND "TIMESTAMP" < :before`;
           binds.before = req.query.before;
         }
+        // Refresh: only entries at or after the newest one already shown (the screen drops the
+        // ones it has by id), so a refresh with nothing new returns nothing.
+        if (typeof req.query.since === 'string' && req.query.since) {
+          sql += ` AND "TIMESTAMP" >= :since`;
+          binds.since = req.query.since;
+        }
 
         sql += ` ORDER BY "TIMESTAMP" DESC`;
 
