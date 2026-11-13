@@ -50,10 +50,11 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
         [req.params.id]
       );
 
-      // Now delete dependent access codes
-      await connection.execute(`DELETE FROM accessCodes WHERE locationId = :id`, [req.params.id]);
+      // The location's access codes are retired with it (soft delete; passes keep their codes)
+      const locDel = { id: req.params.id, deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') };
+      await connection.execute(`UPDATE accessCodes SET status = 'deleted', deletedAt = :deletedAt, deletedBy = :deletedBy WHERE locationId = :id AND deletedAt IS NULL`, locDel);
 
-      await connection.execute(`UPDATE locations SET deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id`, { id: req.params.id, deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') });
+      await connection.execute(`UPDATE locations SET deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id`, locDel);
       await connection.commit();
       logAction(req, 'DELETE', 'location', req.params.id, `Deleted location and archived associated passes`);
       res.json({ success: true });
@@ -69,7 +70,10 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
     let connection;
     try {
       connection = await getConnection();
-      await connection.execute(`DELETE FROM accessCodes WHERE id = :id`, [req.params.id]);
+      await connection.execute(
+        `UPDATE accessCodes SET status = 'deleted', deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id`,
+        { id: req.params.id, deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') }
+      );
       await connection.commit();
       logAction(req, 'DELETE', 'access_code', req.params.id, `Deleted access code`);
       res.json({ success: true });
@@ -90,11 +94,12 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
       const locsResult = await connection.execute(`SELECT id FROM locations WHERE categoryId = :id`, [req.params.id], { outFormat: oracledb.OUT_FORMAT_OBJECT });
       const locationIds = (locsResult.rows || []).map((l: any) => l.ID || l.id);
 
+      const catDel = { deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') };
       for (const locId of locationIds) {
         await connection.execute(`UPDATE passes SET status = 'archived' WHERE locationId = :id`, [locId]);
         await connection.execute(`UPDATE passRequests SET status = 'archived' WHERE locationId = :id`, [locId]);
-        await connection.execute(`DELETE FROM accessCodes WHERE locationId = :id`, [locId]);
-        await connection.execute(`UPDATE locations SET deletedAt = :deletedAt WHERE id = :id`, { id: locId, deletedAt: new Date().toISOString() });
+        await connection.execute(`UPDATE accessCodes SET status = 'deleted', deletedAt = :deletedAt, deletedBy = :deletedBy WHERE locationId = :id AND deletedAt IS NULL`, { ...catDel, id: locId });
+        await connection.execute(`UPDATE locations SET deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id AND deletedAt IS NULL`, { ...catDel, id: locId });
       }
 
       await connection.execute(`UPDATE categories SET deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id`, { id: req.params.id, deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') });
@@ -297,13 +302,16 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
 
       // Check target user exists
       const targetUserRes = await connection.execute(
-        `SELECT id, email, role, displayName, department, division, project FROM users WHERE id = :id`,
+        `SELECT id, email, role, displayName, department, division, project FROM users WHERE id = :id AND deletedAt IS NULL`,
         [req.params.id],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
       const targetUser = toCamelCase((targetUserRes.rows as any[])?.[0]);
       if (!targetUser) {
         return res.status(404).json({ error: "User account not found" });
+      }
+      if (targetUser.role === 'system') {
+        return res.status(403).json({ error: "The system account records automatic actions and cannot be deleted." });
       }
 
       // Protect Master Platform Administrator
@@ -329,12 +337,26 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
       // Clear any live presence for this user
       activePresences.delete(req.params.id);
 
-      // Perform clean DB deletion
-      await connection.execute(`DELETE FROM users WHERE id = :id`, { id: req.params.id });
+      // Soft delete: the row stays so applications, history and notifications keep resolving to
+      // this person's name. Sign-in is removed: the email is released (so it can be registered
+      // again), the password can no longer match, and open sessions are refused (status check in
+      // authorize). The original email is kept in the audit entry below.
+      await connection.execute(
+        `UPDATE users SET status = 'deleted', email = :anonEmail, password = :lockedPassword,
+           resetTokenHash = NULL, resetTokenExpiry = NULL, deletedAt = :deletedAt, deletedBy = :deletedBy
+         WHERE id = :id`,
+        {
+          id: req.params.id,
+          anonEmail: `deleted.${req.params.id}@deleted.invalid`,
+          lockedPassword: `!deleted-${crypto.randomBytes(16).toString('hex')}`,
+          deletedAt: new Date().toISOString(),
+          deletedBy: currentUserId || ''
+        }
+      );
       await connection.commit();
 
       const targetLabel = targetUser.displayName || targetUser.email || req.params.id;
-      logAction(req, 'DELETE', 'user', req.params.id, `Permanently deleted user account ${targetLabel} (${targetUser.email})`);
+      logAction(req, 'DELETE', 'user', req.params.id, `Deleted user account ${targetLabel} (${targetUser.email}); record kept for history, sign-in removed`);
       res.json({ success: true, message: `User account ${targetLabel} deleted successfully.` });
     } catch (err: any) {
       logger.error('Failed to delete user', { err: err });
@@ -349,10 +371,10 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
     try {
       connection = await getConnection();
       const { orgId, isPowerAdmin } = await getTenantOrgId(req, connection);
-      let query = `SELECT * FROM accessCodes`;
+      let query = `SELECT * FROM accessCodes WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId && !isPowerAdmin) {
-        query += ` WHERE (organizationId = :orgId OR isGlobal = 1 OR (organizationId IS NULL AND :isDefaultOrg = 1))`;
+        query += ` AND (organizationId = :orgId OR isGlobal = 1 OR (organizationId IS NULL AND :isDefaultOrg = 1))`;
         binds.orgId = orgId;
         binds.isDefaultOrg = orgId === 'org-habari' ? 1 : 0;
       }
@@ -597,7 +619,7 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
       const { orgId, isPowerAdmin } = await getTenantOrgId(req, connection);
       const includePlatformAdmin = req.query.includePlatformAdmin === 'true';
 
-      const conditions: string[] = [];
+      const conditions: string[] = ["deletedAt IS NULL", "role <> 'system'"];
       const binds: any = {};
 
       if (!includePlatformAdmin) {

@@ -17,7 +17,7 @@ import {
 import { cn } from '../../lib/utils';
 import { UserProfile, BrandingSettings } from '../../types';
 
-export type PowerAdminTab = 'companies' | 'license-new' | 'plans' | 'health' | 'global-ports' | 'broadcast';
+export type PowerAdminTab = 'companies' | 'license-new' | 'plans' | 'health' | 'integrity' | 'global-ports' | 'broadcast';
 
 interface PowerAdminSidebarProps {
   user: UserProfile;
@@ -155,7 +155,13 @@ export function PowerAdminSidebar({
               active={activeTab === 'health'}
               onClick={() => setActiveTab('health')}
             />
-            <SidebarNavItem 
+            <SidebarNavItem
+              icon={<Database />}
+              label="Data Integrity"
+              active={activeTab === 'integrity'}
+              onClick={() => setActiveTab('integrity')}
+            />
+            <SidebarNavItem
               icon={<Layers />} 
               label="Master Port Catalog" 
               active={activeTab === 'global-ports'}

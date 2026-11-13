@@ -8,7 +8,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees } from "./src/server/requestLinks.ts";
-import { enforceForeignKeys } from "./src/server/integrity.ts";
+import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "./src/server/realtime.ts";
@@ -449,6 +449,32 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       return { status: 'active' };
     }
 
+    // --- Account status (sessions end when an account is deleted or deactivated) ---
+    // A signed session cookie stays valid until it expires, so the account itself is re-checked.
+    // Cached for 10 s per user, like the organization status above.
+    const userStatusCache = new Map<string, { active: boolean; timestamp: number }>();
+    async function isAccountActive(userId: string): Promise<boolean> {
+      const now = Date.now();
+      const cached = userStatusCache.get(userId);
+      if (cached && now - cached.timestamp < 10000) return cached.active;
+      try {
+        const conn = await getConnection();
+        try {
+          const r = await conn.execute(`SELECT status, deletedAt FROM users WHERE id = :id`, [userId], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          const row: any = r.rows?.[0];
+          const status = String(row?.STATUS ?? row?.status ?? 'active').toLowerCase();
+          const active = !!row && !(row.DELETEDAT ?? row.deletedAt) && status === 'active';
+          userStatusCache.set(userId, { active, timestamp: now });
+          return active;
+        } finally {
+          await conn.close();
+        }
+      } catch (err) {
+        logger.error('Error checking account status', { err: err });
+        return true; // the request itself will fail if the database is down
+      }
+    }
+
     // --- Authorization Middleware ---
     const authorize = (roles: string[] = []) => {
       return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -460,6 +486,11 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         return next();
       }
       return res.status(401).json({ error: "Unauthorized: Please log in." });
+    }
+
+    if (!(await isAccountActive(String(verifiedSession.id)))) {
+      clearSessionCookie(res);
+      return res.status(401).json({ error: "Your account is no longer active. Please contact an administrator." });
     }
 
     // Overwrite any client-supplied identity headers with the cryptographically verified values.
@@ -493,7 +524,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
           const orgInfo = await getCachedOrgStatus(String(verifiedSession.organizationId));
           const orgStatus = orgInfo.status ? orgInfo.status.toLowerCase() : 'active';
           
-          if (orgStatus === 'suspended' || orgStatus === 'terminated') {
+          if (orgStatus === 'suspended' || orgStatus === 'terminated' || orgStatus === 'deleted') {
             return res.status(403).json({
               error: `Organization Access Suspended: Your company account is currently ${orgStatus.toUpperCase()}. ${orgInfo.statusReason ? '(' + orgInfo.statusReason + '). ' : ''}Please contact platform administration.`,
               code: "ORG_SUSPENDED",
@@ -1246,6 +1277,25 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       safeDirname,
       shared: {}
     };
+  // Application routes accept the ID in any letter case, but rows they write (history, passes,
+  // links) must carry the ID exactly as stored, or they point at nothing. Resolve it once here.
+  app.param('id', async (req, res, next, id) => {
+    // Runs before the route's authorize(); no lookup for requests that carry no session at all.
+    if (!req.path.startsWith('/api/passApplications/') || !getSessionToken(req)) return next();
+    let conn;
+    try {
+      conn = await getConnection();
+      const r = await conn.execute(`SELECT id FROM passRequests WHERE UPPER(id) = UPPER(:id)`, [String(id)], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+      const row: any = r.rows?.[0];
+      if (row) req.params.id = String(row.ID ?? row.id);
+      next();
+    } catch (err) {
+      next(err);
+    } finally {
+      if (conn) await conn.close();
+    }
+  });
+
   registerAuthRoutes(app, routeCtx);
   registerEmployeeRoutes(app, routeCtx);
   registerResourceRoutes(app, routeCtx);
@@ -1615,6 +1665,20 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         await conn.execute(`DELETE FROM passRequestAccessCodes WHERE requestId NOT IN (SELECT id FROM passRequests)`);
         await conn.execute(`DELETE FROM passAccessCodes WHERE passId NOT IN (SELECT id FROM passes)`);
         await conn.commit(); // ALTER TABLE commits implicitly on Oracle; make the cleanup explicit first
+        await enforceForeignKeys(conn, getDbEngine());
+      }
+    },
+    {
+      // People, access codes and organizations are now soft-deleted, so they can be constrained
+      // too. Automatic actions recorded as 'system' get a real (non-login) account row, references
+      // that differ from their record's ID only in letter case are re-pointed to it, and then every
+      // relation that is clean gets its foreign key. Anything still dangling is left untouched and
+      // listed under Data Integrity in the platform portal.
+      id: '2026-11-13-system-account-case-repair-foreign-keys',
+      run: async (conn) => {
+        await ensureSystemUser(conn);
+        await repairCaseMismatches(conn);
+        await conn.commit();
         await enforceForeignKeys(conn, getDbEngine());
       }
     }

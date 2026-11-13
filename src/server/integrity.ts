@@ -1,49 +1,88 @@
-// --- Referential integrity: orphan report + foreign-key constraints ---
+// --- Referential integrity: orphan report, case repair, foreign-key constraints ---
 //
-// Only relations whose parent rows are never hard-deleted are enforced (applications, passes,
-// employees, locations and categories are soft-deleted). References to users, access codes and
-// organizations are deliberately left out: those parents are still hard-deleted and history rows
-// (audit, request history) must outlive them.
+// Every parent table referenced here is soft-deleted (rows are marked deletedAt, never removed),
+// so foreign keys never block a delete and history always resolves to its record. Automatic
+// actions are attributed to the reserved 'system' account row, so it is a real reference too.
 //
-// A constraint is only added when its relation has no orphans, so enforcing never deletes or
-// rewrites data. Relations with orphans are reported and skipped until the data is cleaned up.
+// Audit logs are intentionally not constrained: they are an append-only record that is archived
+// and expired on its own schedule, and they already store the actor's name and email.
+//
+// Rules:
+//  - Reporting never changes data.
+//  - Case repair only re-points a reference to the one parent row it matches when case is
+//    ignored (e.g. 'abc123' -> 'ABC123'); ambiguous or missing parents are left alone.
+//  - A constraint is only added to a relation that is already clean; nothing is ever deleted
+//    to make a constraint fit.
+import crypto from 'crypto';
 import { logger } from './log.ts';
+
+export const SYSTEM_USER_ID = 'system';
 
 export interface Relation {
   name: string;   // constraint name
+  group: 'Applications & passes' | 'People' | 'Access codes' | 'Organizations';
+  label: string;  // plain-language description for the report screen
   child: string;
   column: string;
   parent: string;
 }
 
+const org = (child: string, label: string): Relation =>
+  ({ name: `fk_${child.toLowerCase().slice(0, 16)}_org`, group: 'Organizations', label, child, column: 'organizationId', parent: 'organizations' });
+
 export const RELATIONS: Relation[] = [
-  { name: 'fk_pre_request',  child: 'passRequestEmployees',   column: 'requestId',    parent: 'passRequests' },
-  { name: 'fk_pre_employee', child: 'passRequestEmployees',   column: 'employeeId',   parent: 'employees' },
-  { name: 'fk_prac_request', child: 'passRequestAccessCodes', column: 'requestId',    parent: 'passRequests' },
-  { name: 'fk_pac_pass',     child: 'passAccessCodes',        column: 'passId',       parent: 'passes' },
-  { name: 'fk_hist_request', child: 'requestHistory',         column: 'requestId',    parent: 'passRequests' },
-  { name: 'fk_pass_request', child: 'passes',                 column: 'requestId',    parent: 'passRequests' },
-  { name: 'fk_pass_employee', child: 'passes',                column: 'employeeId',   parent: 'employees' },
-  { name: 'fk_pass_location', child: 'passes',                column: 'locationId',   parent: 'locations' },
-  { name: 'fk_pass_parent',  child: 'passes',                 column: 'parentPassId', parent: 'passes' },
-  { name: 'fk_req_location', child: 'passRequests',           column: 'locationId',   parent: 'locations' },
-  { name: 'fk_req_parent',   child: 'passRequests',           column: 'parentPassId', parent: 'passes' },
-  { name: 'fk_loc_category', child: 'locations',              column: 'categoryId',   parent: 'categories' },
+  { name: 'fk_pre_request',   group: 'Applications & passes', label: 'Employee link → application',      child: 'passRequestEmployees',   column: 'requestId',    parent: 'passRequests' },
+  { name: 'fk_pre_employee',  group: 'Applications & passes', label: 'Employee link → employee',         child: 'passRequestEmployees',   column: 'employeeId',   parent: 'employees' },
+  { name: 'fk_hist_request',  group: 'Applications & passes', label: 'Application history → application', child: 'requestHistory',       column: 'requestId',    parent: 'passRequests' },
+  { name: 'fk_pass_request',  group: 'Applications & passes', label: 'Pass → application',               child: 'passes',                 column: 'requestId',    parent: 'passRequests' },
+  { name: 'fk_pass_employee', group: 'Applications & passes', label: 'Pass → employee',                  child: 'passes',                 column: 'employeeId',   parent: 'employees' },
+  { name: 'fk_pass_location', group: 'Applications & passes', label: 'Pass → location',                  child: 'passes',                 column: 'locationId',   parent: 'locations' },
+  { name: 'fk_pass_parent',   group: 'Applications & passes', label: 'Supplementary pass → main pass',   child: 'passes',                 column: 'parentPassId', parent: 'passes' },
+  { name: 'fk_req_location',  group: 'Applications & passes', label: 'Application → location',           child: 'passRequests',           column: 'locationId',   parent: 'locations' },
+  { name: 'fk_req_parent',    group: 'Applications & passes', label: 'Application → main pass',          child: 'passRequests',           column: 'parentPassId', parent: 'passes' },
+  { name: 'fk_loc_category',  group: 'Applications & passes', label: 'Location → category',              child: 'locations',              column: 'categoryId',   parent: 'categories' },
+
+  { name: 'fk_req_requester', group: 'People', label: 'Application → requester',        child: 'passRequests',   column: 'requesterId',   parent: 'users' },
+  { name: 'fk_req_approver',  group: 'People', label: 'Application → approver',         child: 'passRequests',   column: 'approverId',    parent: 'users' },
+  { name: 'fk_req_forwarded', group: 'People', label: 'Application → forwarded to',     child: 'passRequests',   column: 'forwardedToId', parent: 'users' },
+  { name: 'fk_hist_user',     group: 'People', label: 'Application history → user',     child: 'requestHistory', column: 'userId',        parent: 'users' },
+  { name: 'fk_notif_user',    group: 'People', label: 'Notification → recipient',       child: 'notifications',  column: 'userId',        parent: 'users' },
+
+  { name: 'fk_prac_request',  group: 'Access codes', label: 'Application access code → application', child: 'passRequestAccessCodes', column: 'requestId',    parent: 'passRequests' },
+  { name: 'fk_prac_code',     group: 'Access codes', label: 'Application access code → access code', child: 'passRequestAccessCodes', column: 'accessCodeId', parent: 'accessCodes' },
+  { name: 'fk_pac_pass',      group: 'Access codes', label: 'Pass access code → pass',               child: 'passAccessCodes',        column: 'passId',       parent: 'passes' },
+  { name: 'fk_pac_code',      group: 'Access codes', label: 'Pass access code → access code',        child: 'passAccessCodes',        column: 'accessCodeId', parent: 'accessCodes' },
+  { name: 'fk_code_location', group: 'Access codes', label: 'Access code → location',                child: 'accessCodes',            column: 'locationId',   parent: 'locations' },
+
+  org('users', 'User → organization'),
+  org('employees', 'Employee → organization'),
+  org('passes', 'Pass → organization'),
+  org('passRequests', 'Application → organization'),
+  org('locations', 'Location → organization'),
+  org('categories', 'Category → organization'),
+  org('accessCodes', 'Access code → organization'),
+  org('notifications', 'Notification → organization'),
+  org('divisions', 'Division → organization'),
+  org('departments', 'Department → organization'),
 ];
 
 export interface RelationReport extends Relation {
-  orphans: number;            // child rows pointing at no parent row
-  caseOnlyMismatches: number; // ...of which a parent exists if case is ignored (fixable by normalising)
+  rows: number;               // child rows that hold a reference
+  orphans: number;            // ...pointing at no parent row
+  caseOnlyMismatches: number; // ...of which exactly one parent matches when case is ignored (repairable)
   samples: { id: string; ref: string }[];
   constraint: 'enforced' | 'missing' | 'not-supported';
+  error?: string;             // the relation could not be checked (e.g. column absent in this schema)
 }
 
 const n = (row: any) => Number(row?.CNT ?? row?.cnt ?? 0);
 
-// Child rows with a non-empty reference and no matching parent. LENGTH() > 0 excludes empty
-// strings on SQLite (Oracle already stores '' as NULL).
-const orphanWhere = (r: Relation) =>
-  `c.${r.column} IS NOT NULL AND LENGTH(c.${r.column}) > 0 AND NOT EXISTS (SELECT 1 FROM ${r.parent} p WHERE p.id = c.${r.column})`;
+// Unaliased so the same text works inside UPDATE (SQLite has no UPDATE aliases). Inside the
+// subqueries the parent is aliased p, so "<child>.<column>" always means the outer row, also
+// for the self-reference passes.parentPassId -> passes.
+const hasRef = (r: Relation) => `${r.child}.${r.column} IS NOT NULL AND LENGTH(${r.child}.${r.column}) > 0`;
+const noExactParent = (r: Relation) => `NOT EXISTS (SELECT 1 FROM ${r.parent} p WHERE p.id = ${r.child}.${r.column})`;
+const singleCaseParent = (r: Relation) => `(SELECT COUNT(*) FROM ${r.parent} p WHERE UPPER(p.id) = UPPER(${r.child}.${r.column})) = 1`;
 
 async function existingConstraints(conn: any, engine: string): Promise<Set<string>> {
   if (engine !== 'oracle') return new Set();
@@ -61,27 +100,65 @@ export async function integrityReport(conn: any, engine: string): Promise<Relati
   const constraints = await existingConstraints(conn, engine);
   const out: RelationReport[] = [];
   for (const r of RELATIONS) {
-    const where = orphanWhere(r);
-    const total = n((await conn.execute(`SELECT COUNT(*) AS cnt FROM ${r.child} c WHERE ${where}`, {}, opts)).rows?.[0]);
-    let caseOnly = 0;
-    let samples: { id: string; ref: string }[] = [];
-    if (total > 0) {
-      caseOnly = n((await conn.execute(
-        `SELECT COUNT(*) AS cnt FROM ${r.child} c WHERE ${where} AND EXISTS (SELECT 1 FROM ${r.parent} p WHERE UPPER(p.id) = UPPER(c.${r.column}))`,
-        {}, opts)).rows?.[0]);
-      const s = await conn.execute(
-        `SELECT c.id AS cid, c.${r.column} AS ref FROM ${r.child} c WHERE ${where} FETCH FIRST 5 ROWS ONLY`, {}, opts);
-      samples = ((s.rows || []) as any[]).map(x => ({ id: String(x.CID ?? x.cid), ref: String(x.REF ?? x.ref) }));
-    }
-    out.push({
-      ...r,
-      orphans: total,
-      caseOnlyMismatches: caseOnly,
-      samples,
+    const base: RelationReport = {
+      ...r, rows: 0, orphans: 0, caseOnlyMismatches: 0, samples: [],
       constraint: engine !== 'oracle' ? 'not-supported' : (constraints.has(r.name.toUpperCase()) ? 'enforced' : 'missing'),
-    });
+    };
+    try {
+      base.rows = n((await conn.execute(`SELECT COUNT(*) AS cnt FROM ${r.child} WHERE ${hasRef(r)}`, {}, opts)).rows?.[0]);
+      const orphanWhere = `${hasRef(r)} AND ${noExactParent(r)}`;
+      base.orphans = base.rows === 0 ? 0 : n((await conn.execute(`SELECT COUNT(*) AS cnt FROM ${r.child} WHERE ${orphanWhere}`, {}, opts)).rows?.[0]);
+      if (base.orphans > 0) {
+        base.caseOnlyMismatches = n((await conn.execute(
+          `SELECT COUNT(*) AS cnt FROM ${r.child} WHERE ${orphanWhere} AND ${singleCaseParent(r)}`, {}, opts)).rows?.[0]);
+        const s = await conn.execute(
+          `SELECT ${r.child}.id AS cid, ${r.child}.${r.column} AS ref FROM ${r.child} WHERE ${orphanWhere} FETCH FIRST 5 ROWS ONLY`, {}, opts);
+        base.samples = ((s.rows || []) as any[]).map(x => ({ id: String(x.CID ?? x.cid), ref: String(x.REF ?? x.ref) }));
+      }
+    } catch (e: any) {
+      base.error = String(e?.message || e).split('\n')[0];
+    }
+    out.push(base);
   }
   return out;
+}
+
+// Re-points references that differ from their parent's ID only in letter case. Returns rows fixed
+// per relation. The caller commits.
+export async function repairCaseMismatches(conn: any): Promise<{ name: string; fixed: number }[]> {
+  const fixed: { name: string; fixed: number }[] = [];
+  for (const r of RELATIONS) {
+    try {
+      const res = await conn.execute(
+        `UPDATE ${r.child} SET ${r.column} = (SELECT MIN(p.id) FROM ${r.parent} p WHERE UPPER(p.id) = UPPER(${r.child}.${r.column}))
+         WHERE ${hasRef(r)} AND ${noExactParent(r)} AND ${singleCaseParent(r)}`
+      );
+      const count = Number(res?.rowsAffected || 0);
+      if (count > 0) fixed.push({ name: r.name, fixed: count });
+    } catch (e: any) {
+      logger.warn(`[Integrity] case repair skipped for ${r.name}`, { err: String(e?.message || e).split('\n')[0] });
+    }
+  }
+  if (fixed.length) logger.info('[Integrity] case-only references repaired', { fixed });
+  return fixed;
+}
+
+// The reserved account that automatic actions (daily job, imports, system-created history) are
+// attributed to. It cannot log in: its password field is not a valid hash and it is never active.
+export async function ensureSystemUser(conn: any): Promise<void> {
+  const oracledb = (await import('oracledb')).default;
+  const res = await conn.execute(`SELECT id FROM users WHERE id = :id`, [SYSTEM_USER_ID], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+  if (res.rows && res.rows.length > 0) return;
+  await conn.execute(
+    `INSERT INTO users (id, email, password, role, displayName, status, createdAt)
+     VALUES (:id, :email, :password, 'system', 'System', 'system', :createdAt)`,
+    {
+      id: SYSTEM_USER_ID,
+      email: 'system@accessone.invalid',
+      password: `!locked-${crypto.randomBytes(16).toString('hex')}`,
+      createdAt: new Date().toISOString(),
+    }
+  );
 }
 
 // Adds each missing constraint whose relation is clean. Constraints are DEFERRABLE INITIALLY
@@ -94,7 +171,7 @@ export async function enforceForeignKeys(conn: any, engine: string): Promise<{ a
   if (engine !== 'oracle') return { added, skipped };
   const report = await integrityReport(conn, engine);
   for (const r of report) {
-    if (r.constraint === 'enforced') continue;
+    if (r.constraint === 'enforced' || r.error) continue;
     if (r.orphans > 0) {
       skipped.push({ name: r.name, orphans: r.orphans });
       continue;
@@ -112,6 +189,6 @@ export async function enforceForeignKeys(conn: any, engine: string): Promise<{ a
     }
   }
   if (added.length) logger.info('[Integrity] foreign keys added', { added });
-  if (skipped.length) logger.warn('[Integrity] foreign keys skipped: orphan rows present (see /api/platform/integrity)', { skipped });
+  if (skipped.length) logger.warn('[Integrity] foreign keys skipped: orphan rows present (see Data Integrity in the platform portal)', { skipped });
   return { added, skipped };
 }

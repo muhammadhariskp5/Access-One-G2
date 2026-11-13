@@ -40,7 +40,7 @@ export function registerAuthRoutes(app: express.Express, ctx: RouteContext) {
         }
 
         // Check if display name already exists
-        const nameCheck = await connection.execute(`SELECT id FROM users WHERE displayName = :displayName`, [displayName]);
+        const nameCheck = await connection.execute(`SELECT id FROM users WHERE displayName = :displayName AND deletedAt IS NULL`, [displayName]);
         if (nameCheck.rows && nameCheck.rows.length > 0) {
           return res.status(400).json({ error: "Username already taken. Please choose another." });
         }
@@ -58,7 +58,7 @@ export function registerAuthRoutes(app: express.Express, ctx: RouteContext) {
           if (orgRes.rows && orgRes.rows.length > 0) {
             const targetOrg: any = toCamelCase(orgRes.rows[0]);
             const oStatus = (targetOrg.status || 'active').toLowerCase();
-            if (oStatus === 'suspended' || oStatus === 'terminated') {
+            if (oStatus === 'suspended' || oStatus === 'terminated' || oStatus === 'deleted') {
               return res.status(403).json({
                 error: `Registration Denied: Organization '${targetOrg.name}' is currently ${oStatus.toUpperCase()}. New user registrations are restricted.`
               });
@@ -197,7 +197,7 @@ export function registerAuthRoutes(app: express.Express, ctx: RouteContext) {
               const isPowerAdminUser = userCamel.role === 'power_admin';
               const orgStatus = (userCamel.organization.status || 'active').toLowerCase();
 
-              if (!isPowerAdminUser && (orgStatus === 'suspended' || orgStatus === 'terminated')) {
+              if (!isPowerAdminUser && (orgStatus === 'suspended' || orgStatus === 'terminated' || orgStatus === 'deleted')) {
                 return res.status(403).json({
                   error: `Access Denied: Your organization account (${userCamel.organization.name}) is ${orgStatus.toUpperCase()}. ${userCamel.organization.statusReason ? 'Reason: ' + userCamel.organization.statusReason + '. ' : ''}Please contact platform administration.`,
                   code: "ORG_SUSPENDED",
@@ -404,7 +404,7 @@ export function registerAuthRoutes(app: express.Express, ctx: RouteContext) {
           return res.json({ available: result.rows?.length === 0 });
         }
         if (displayName) {
-          const result = await connection.execute(`SELECT id FROM users WHERE displayName = :displayName`, [displayName.toString()]);
+          const result = await connection.execute(`SELECT id FROM users WHERE displayName = :displayName AND deletedAt IS NULL`, [displayName.toString()]);
           return res.json({ available: result.rows?.length === 0 });
         }
         res.status(400).json({ error: "Missing parameters" });

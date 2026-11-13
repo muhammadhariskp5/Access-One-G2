@@ -403,7 +403,7 @@ export function registerActivityRoutes(app: express.Express, ctx: RouteContext) 
         try {
           let usersSql = `SELECT id, email, role, displayName, photoURL, status, phone, jobTitle, department, division, project, organizationId, createdAt, lastLogin, preferences 
                           FROM users 
-                          WHERE role != 'power_admin'`;
+                          WHERE role != 'power_admin' AND role <> 'system' AND deletedAt IS NULL`;
           const userBinds: any = {};
           if (orgId && !isPowerAdmin) {
             usersSql += ` AND organizationId = :orgId`;

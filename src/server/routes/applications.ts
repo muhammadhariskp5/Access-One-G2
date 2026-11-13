@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
 import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
+import { SYSTEM_USER_ID } from "../integrity.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
 import type { RealtimeClient } from "../realtime.ts";
@@ -69,7 +70,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       });
 
       const allowedFields = [
-        'requesterId', 'locationId', 'purpose', 'startDate', 'endDate', 
+        'locationId', 'purpose', 'startDate', 'endDate',
         'status', 'authorityAppNumber', 'parentPassId', 'remarks', 'expiryDate', 'type',
         'projectId', 'contractNumber', 'contractName', 'contractTitle', 'clientCompany', 'clientApprovers'
       ];
@@ -78,10 +79,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         if (req.body[field] !== undefined) filteredBody[field] = req.body[field];
       });
 
-      // Ensure requesterId is mapped from req.body.requesterId or req.body.applicantId or header
-      if (!filteredBody.requesterId) {
-        filteredBody.requesterId = req.body.applicantId || (req.headers['x-user-id'] as string) || 'system';
-      }
+      // The requester is whoever is signed in (from the verified session), never a client value.
+      filteredBody.requesterId = (req.headers['x-user-id'] as string) || SYSTEM_USER_ID;
 
       // Map expiryDate to endDate if provided, or fallback to max individual expiry
       let resolvedEndDate = filteredBody.endDate || filteredBody.expiryDate;
@@ -430,7 +429,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       connection = await getConnection();
 
       const allowedUpdateFields = [
-        'requesterId', 'locationId', 'purpose', 'startDate', 'endDate', 
+        'locationId', 'purpose', 'startDate', 'endDate',
         'status', 'authorityAppNumber', 'parentPassId', 'remarks', 'approvalRemarks',
         'employeeIds', 'employeeStatuses', 'accessCodes', 'individualExpiries', 'individualStartDates', 'temporaryNames', 'type',
         'projectId', 'contractNumber', 'contractName', 'contractTitle', 'clientCompany', 'clientApprovers', 'expiryDate'
@@ -558,7 +557,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
     let connection;
     try {
       connection = await getConnection();
-      const { status, remarks, approvalRemarks, approverId } = req.body;
+      const { status, remarks, approvalRemarks } = req.body;
       const now = new Date().toISOString();
 
       const result = await connection.execute(`SELECT * FROM passRequests WHERE UPPER(id) = UPPER(:id)`, [req.params.id]);
@@ -568,12 +567,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const updates: any = { status, updatedAt: now };
       if (remarks) updates.remarks = remarks;
       if (approvalRemarks) updates.approvalRemarks = approvalRemarks;
-      const activeUserId = (req.headers['x-user-id'] as string) || '';
-      if (approverId) {
-        updates.approverId = approverId;
-      } else if (activeUserId && activeUserId !== 'System') {
-        updates.approverId = activeUserId;
-      }
+      // The approver is whoever is signed in (verified session), never a client-supplied value.
+      const actorId = (req.headers['x-user-id'] as string) || SYSTEM_USER_ID;
+      updates.approverId = actorId;
 
       const dbUpdates = toOracleKeys(updates);
       const setClause = Object.keys(dbUpdates).map(key => `${key} = :${key}`).join(', ');
@@ -596,8 +592,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
            VALUES (:id, :requestId, :userId, :action, :remarks, :timestamp)`,
           {
             id: histId,
-            requestId: req.params.id,
-            userId: approverId || (req.headers['x-user-id'] as string) || 'system',
+            requestId: application.ID || application.id || req.params.id,
+            userId: actorId,
             action: `STATUS_CHANGE (${(status || '').toUpperCase()})`,
             remarks: approvalRemarks || remarks || `Application status changed to ${status}`,
             timestamp: now

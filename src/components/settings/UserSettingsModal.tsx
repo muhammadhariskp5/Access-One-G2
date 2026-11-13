@@ -246,7 +246,7 @@ Share it securely; it will not be shown again.`);
       const mappingDesc = `Department: ${user.department || 'Unassigned'} • Role: ${user.role} • Active Linked Requests: ${checkData.pendingCount}`;
       showConfirm(
         'Delete User Account',
-        `Are you sure you want to permanently delete user "${user.displayName || user.email}"?\n\nSystem Mappings: ${mappingDesc}.\n\nThis action cannot be undone.`,
+        `Delete user "${user.displayName || user.email}"?\n\nSystem Mappings: ${mappingDesc}.\n\nThey will no longer be able to sign in. Their name stays on past applications and history.`,
         async () => {
           try {
             const res = await apiFetch(`/api/users/${user.id}`, { method: 'DELETE' });
@@ -868,7 +868,7 @@ Share it securely; it will not be shown again.`);
                     <div>
                       <h5 className="text-xs font-bold text-rose-900">Delete User Account</h5>
                       <p className="text-[11px] text-rose-600/80 mt-0.5">
-                        Permanently removes this user from the system database. This action is audited.
+                        Removes sign-in access. The record is kept so past applications and history still show who did what. This action is audited.
                       </p>
                     </div>
                     <button

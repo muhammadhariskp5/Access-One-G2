@@ -174,7 +174,7 @@ export function Settings({
 
       showConfirm(
         "Delete User Account",
-        `Are you sure you want to permanently delete user "${userName}"?\n\nSystem Mappings: ${mappingInfo}\n\nThis action will erase the database record and cannot be undone.`,
+        `Delete user "${userName}"?\n\nSystem Mappings: ${mappingInfo}\n\nThey will no longer be able to sign in. Their name stays on past applications and history.`,
         async () => {
           try {
             const res = await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });

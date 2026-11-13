@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
 import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
+import { SYSTEM_USER_ID } from "../integrity.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
 import type { RealtimeClient } from "../realtime.ts";
@@ -53,7 +54,16 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
     try {
       connection = await getConnection();
       const { employeeIds, requestId: existingRequestId, ...commonData } = req.body;
-      const requestId = (existingRequestId || req.body.requestId || newRef()).trim().toUpperCase();
+      // Use the application's ID exactly as stored. (Upper-casing the incoming ID made rows of
+      // older, mixed-case applications point at an ID that doesn't exist.)
+      let requestId = String(existingRequestId || req.body.requestId || '').trim();
+      if (requestId) {
+        const found = await connection.execute(`SELECT id FROM passRequests WHERE UPPER(id) = UPPER(:id)`, [requestId], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        const row: any = found.rows?.[0];
+        requestId = row ? String(row.ID ?? row.id) : requestId.toUpperCase();
+      } else {
+        requestId = newRef();
+      }
       const { orgId } = await getTenantOrgId(req, connection);
       const effectiveOrgId = orgId || req.body.organizationId || 'org-habari';
 
@@ -150,7 +160,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
 
       const newRequest = toOracleKeys({
         id: requestId,
-        requesterId: req.body.requesterId || 'system',
+        requesterId: (req.headers['x-user-id'] as string) || SYSTEM_USER_ID, // verified session, never a client value
         locationId: filteredCommonData.locationId,
         type: filteredCommonData.type || 'main',
         status: initialRequestStatus,

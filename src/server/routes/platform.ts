@@ -11,7 +11,7 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
-import { integrityReport, enforceForeignKeys } from "../integrity.ts";
+import { integrityReport, enforceForeignKeys, repairCaseMismatches } from "../integrity.ts";
 
 // platform routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) {
@@ -28,8 +28,8 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
       connection = await getConnection();
 
       const [orgsRes, usersRes, compRes] = await Promise.all([
-        connection.execute(`SELECT * FROM organizations`, [], { outFormat: oracledb.OUT_FORMAT_OBJECT }).catch(() => ({ rows: [] })),
-        connection.execute(`SELECT role, status FROM users`, [], { outFormat: oracledb.OUT_FORMAT_OBJECT }),
+        connection.execute(`SELECT * FROM organizations WHERE deletedAt IS NULL`, [], { outFormat: oracledb.OUT_FORMAT_OBJECT }).catch(() => ({ rows: [] })),
+        connection.execute(`SELECT role, status FROM users WHERE deletedAt IS NULL AND role <> 'system'`, [], { outFormat: oracledb.OUT_FORMAT_OBJECT }),
         connection.execute(`SELECT * FROM companySettings`, [], { outFormat: oracledb.OUT_FORMAT_OBJECT })
       ]);
 
@@ -175,7 +175,7 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
     try {
       connection = await getConnection();
       const result = await connection.execute(
-        `SELECT * FROM organizations ORDER BY createdAt DESC`,
+        `SELECT * FROM organizations WHERE deletedAt IS NULL ORDER BY createdAt DESC`,
         [],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
@@ -744,7 +744,10 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
       const relations = await integrityReport(connection, engine);
       res.json({
         engine,
-        clean: relations.every(r => r.orphans === 0),
+        generatedAt: new Date().toISOString(),
+        clean: relations.every(r => r.orphans === 0 && !r.error),
+        orphans: relations.reduce((s, r) => s + r.orphans, 0),
+        repairable: relations.reduce((s, r) => s + r.caseOnlyMismatches, 0),
         enforced: relations.filter(r => r.constraint === 'enforced').length,
         total: relations.length,
         relations
@@ -752,6 +755,26 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
     } catch (err: any) {
       logger.error('Integrity report failed', { err: err });
       res.status(500).json({ error: "Failed to build integrity report" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  // Re-points references that differ from their record's ID only in letter case. Lossless: each
+  // fixed row now points at the record it already meant; nothing is deleted.
+  app.post("/api/platform/integrity/repair", authorizePowerAdmin(), async (req, res) => {
+    let connection;
+    try {
+      connection = await getConnection();
+      const fixed = await repairCaseMismatches(connection);
+      await connection.commit();
+      const total = fixed.reduce((s, f) => s + f.fixed, 0);
+      logAction(req, 'UPDATE', 'database', 'case-repair', `Re-pointed ${total} reference(s) differing only in letter case`);
+      res.json({ fixed, total });
+    } catch (err: any) {
+      try { await connection?.rollback(); } catch { /* ignore */ }
+      logger.error('Case repair failed', { err: err });
+      res.status(500).json({ error: "Failed to repair references" });
     } finally {
       if (connection) await connection.close();
     }
@@ -782,7 +805,7 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
       connection = await getConnection();
 
       const orgRes = await connection.execute(
-        `SELECT name, isCurrent FROM organizations WHERE id = :id`,
+        `SELECT name, isCurrent FROM organizations WHERE id = :id AND deletedAt IS NULL`,
         [orgId],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
@@ -796,8 +819,14 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
         return res.status(400).json({ error: "Cannot delete the default active system profile." });
       }
 
-      await connection.execute(`DELETE FROM organizations WHERE id = :id`, [orgId]);
+      // Soft delete: the company's employees, passes, applications and history stay intact and
+      // keep resolving to it; its users can no longer sign in (status 'deleted' is blocked).
+      await connection.execute(
+        `UPDATE organizations SET status = 'deleted', isCurrent = 0, deletedAt = :deletedAt, deletedBy = :deletedBy WHERE id = :id`,
+        { id: orgId, deletedAt: new Date().toISOString(), deletedBy: String(req.headers['x-user-id'] || '') }
+      );
       await connection.commit();
+      orgStatusCache.delete(orgId);
 
       logAction(req, 'DELETE', 'organization', orgId, `Removed licensed company record ${org.name}`);
       res.json({ success: true, message: `Company ${org.name} removed successfully` });

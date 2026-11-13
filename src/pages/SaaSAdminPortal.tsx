@@ -68,6 +68,7 @@ export function SaaSAdminPortal({
       case 'license-new': return 'License New Company';
       case 'plans': return 'Subscription Plans';
       case 'health': return 'Platform & DB Health';
+      case 'integrity': return 'Data Integrity';
       case 'global-ports': return 'Master Port Catalog (Global Ports & Gates)';
       case 'broadcast': return 'System Maintenance Banner Broadcast';
       default: return 'Platform Control';

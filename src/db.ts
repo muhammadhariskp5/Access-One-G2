@@ -1053,7 +1053,7 @@ export async function initializeDatabase() {
     }
 
     // Soft delete: records with history value are marked deleted, never removed.
-    for (const table of ['employees', 'passes', 'passRequests', 'locations', 'categories']) {
+    for (const table of ['employees', 'passes', 'passRequests', 'locations', 'categories', 'users', 'accessCodes', 'organizations']) {
       for (const col of ['deletedAt', 'deletedBy']) {
         try {
           await connection.execute(`SELECT ${col} FROM ${table} WHERE 1=0`);

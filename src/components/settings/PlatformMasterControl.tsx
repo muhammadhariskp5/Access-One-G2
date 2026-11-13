@@ -54,6 +54,7 @@ import { PowerAdminTab } from '../layout/PowerAdminSidebar';
 import { GlobalMasterPortCatalog } from './GlobalMasterPortCatalog';
 import { MaintenanceBroadcastAdmin } from './MaintenanceBroadcastAdmin';
 import { TenantStatusModal } from './TenantStatusModal';
+import { DataIntegrityPanel } from './DataIntegrityPanel';
 
 interface PlatformMasterControlProps {
   currentCompany: BrandingSettings | null;
@@ -1239,6 +1240,11 @@ export function PlatformMasterControl({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Data integrity: dangling references, case repair, database-enforced links */}
+      {activeTab === 'integrity' && (
+        <DataIntegrityPanel showToast={showToast} showConfirm={showConfirm} />
       )}
 
       {/* TAB 5: Master Port Catalog */}

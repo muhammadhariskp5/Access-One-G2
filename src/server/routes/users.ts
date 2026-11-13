@@ -50,7 +50,7 @@ export function registerUserRoutes(app: express.Express, ctx: RouteContext) {
 
       connection = await getConnection();
       const tRes = await connection.execute(
-        `SELECT id, role, organizationId, password FROM users WHERE id = :id`,
+        `SELECT id, role, organizationId, password FROM users WHERE id = :id AND deletedAt IS NULL AND role <> 'system'`,
         [targetUserId],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
@@ -166,7 +166,7 @@ export function registerUserRoutes(app: express.Express, ctx: RouteContext) {
       connection = await getConnection();
 
       const tRes = await connection.execute(
-        `SELECT id, role, organizationId FROM users WHERE id = :id`,
+        `SELECT id, role, organizationId FROM users WHERE id = :id AND deletedAt IS NULL AND role <> 'system'`,
         [req.params.id],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
