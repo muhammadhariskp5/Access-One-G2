@@ -751,7 +751,9 @@ export async function initializeDatabase() {
               { name: 'CONTRACTNAME', type: 'VARCHAR2(255)' },
               { name: 'CLIENTCOMPANY', type: 'VARCHAR2(255)' },
               { name: 'CLIENTAPPROVERS', type: 'VARCHAR2(2000)' },
-              { name: 'ORGANIZATIONID', type: 'VARCHAR2(50)' }
+              { name: 'ORGANIZATIONID', type: 'VARCHAR2(50)' },
+              // Written by every application create; was missing here, so fresh databases failed.
+              { name: 'TYPE', type: 'VARCHAR2(50) DEFAULT \'main\'' }
             ];
             for (const col of columns) {
               const colCheckSql = `SELECT column_name FROM user_tab_cols WHERE table_name = 'PASSREQUESTS' AND column_name = '${col.name}'`;
@@ -1146,16 +1148,8 @@ export async function initializeDatabase() {
     // (The one-time organizationId backfill for legacy locations/categories/accessCodes is now a
     // recorded data migration in server.ts, so global items created later are not reassigned.)
 
-    // Cleanup dangling derived link rows (rebuilt from passRequests; no history lost)
-    try {
-      await connection.execute(`DELETE FROM passRequestEmployees WHERE requestId NOT IN (SELECT id FROM passRequests)`);
-      await connection.execute(`DELETE FROM passRequestAccessCodes WHERE requestId NOT IN (SELECT id FROM passRequests)`);
-      await connection.execute(`DELETE FROM passAccessCodes WHERE passId NOT IN (SELECT id FROM passes)`);
-      // NOTE: passes are never deleted here. (This previously deleted every pass whose employee
-      // had been removed, on every startup — silently erasing pass history.)
-    } catch (cleanErr) {
-      logger.error('Non-critical cleanup warning', { err: cleanErr });
-    }
+    // (Dangling link-row cleanup no longer runs on every startup: it ran once in the
+    // '2026-11-13-foreign-keys' migration, and foreign keys now prevent new dangling rows.)
 
     await connection.commit();
     logger.info('Database integrity check and timestamp updates completed.');

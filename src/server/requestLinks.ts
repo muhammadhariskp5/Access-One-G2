@@ -54,9 +54,33 @@ export async function syncRequestEmployees(connection: any, requestId: string): 
   }
   for (const [empId, status] of desired) {
     if (seen.has(empId)) continue;
+    // Insert only when the employee row exists: a stale ID in an old application's JSON must not
+    // create a dangling link (or, with foreign keys enforced, make every edit of it fail).
     await connection.execute(
-      `INSERT INTO passRequestEmployees (id, requestId, employeeId, status) VALUES (:id, :requestId, :employeeId, :status)`,
+      `INSERT INTO passRequestEmployees (id, requestId, employeeId, status)
+       SELECT :id, :requestId, e.id, :status FROM employees e WHERE e.id = :employeeId`,
       { id: crypto.randomUUID(), requestId: realId, employeeId: empId, status }
     );
   }
+}
+
+// Returns the IDs from `ids` that have no employee row. Used to reject new applications that
+// name someone who doesn't exist, with a clear message instead of a constraint error.
+export async function findMissingEmployees(connection: any, ids: string[]): Promise<string[]> {
+  const unique = Array.from(new Set(ids.map(String).filter(Boolean)));
+  if (unique.length === 0) return [];
+  const oracledb = (await import("oracledb")).default;
+  const found = new Set<string>();
+  for (let i = 0; i < unique.length; i += 500) {
+    const chunk = unique.slice(i, i + 500);
+    const binds: Record<string, string> = {};
+    chunk.forEach((id, j) => { binds[`e${j}`] = id; });
+    const res = await connection.execute(
+      `SELECT id FROM employees WHERE id IN (${chunk.map((_, j) => `:e${j}`).join(', ')})`,
+      binds,
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const r of (res.rows || []) as any[]) found.add(String(r.ID ?? r.id));
+  }
+  return unique.filter(id => !found.has(id));
 }

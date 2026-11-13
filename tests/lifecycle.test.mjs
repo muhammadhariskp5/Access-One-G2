@@ -21,6 +21,7 @@ before(async () => {
   const db = await openDb(dbPath);
   db.run(`DELETE FROM jobRuns`);
   db.run(`INSERT INTO locations (id, name, code) VALUES ('T_LOC', 'Test Loc', 'TL')`);
+  db.run(`INSERT INTO employees (id, name, employeeId) VALUES ('T_E1', 'Test One', 'TE-1'), ('T_E2', 'Test Two', 'TE-2')`);
   // App A: one person, collected, pass expired -> application closes as 'expired'
   db.run(`INSERT INTO passRequests (id, locationId, status, employeeIds, employeeStatuses, createdAt, updatedAt)
           VALUES ('T_APP_A', 'T_LOC', 'completed', '["T_E1"]', '{"T_E1":"collected"}', :n, :n)`, { ':n': now });

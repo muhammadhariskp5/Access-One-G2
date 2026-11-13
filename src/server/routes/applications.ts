@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees } from "../requestLinks.ts";
+import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
@@ -59,26 +59,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const employeeStatuses = {};
       const employeeIds = Array.from(new Set(req.body.employeeIds || [])) as string[];
 
-      // Prevent overlapping pending/approved applications for same location/employees
-      const locationId = req.body.locationId;
-      if (locationId) {
-        for (const empId of employeeIds) {
-          const overlap = await connection.execute(
-            `SELECT id FROM passRequests 
-             WHERE locationId = :locId 
-             AND status IN ('processing', 'approved') 
-             AND employeeIds LIKE :empPattern`,
-            { 
-              locId: locationId, 
-              empPattern: `%${empId}%` 
-            }
-          );
-          if (overlap.rows?.length > 0) {
-             // We'll log it but let it pass for now if they really want to, 
-             // but maybe it's better to block? 
-             // The frontend already blocks it now.
-          }
-        }
+      const missing = await findMissingEmployees(connection, employeeIds);
+      if (missing.length > 0) {
+        return res.status(400).json({ error: `Unknown employee(s): ${missing.slice(0, 5).join(', ')}` });
       }
 
       employeeIds.forEach((id: string) => {

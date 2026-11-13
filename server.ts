@@ -8,6 +8,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees } from "./src/server/requestLinks.ts";
+import { enforceForeignKeys } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "./src/server/realtime.ts";
@@ -1599,6 +1600,22 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
             if (!/ORA-00955|ORA-01408|ORA-00904|already exists|no such column/i.test(String(e?.message))) throw e;
           }
         }
+      }
+    },
+    {
+      // Foreign keys, so the database itself rejects dangling references. Link rows whose
+      // application or pass no longer exists are derived data (rebuilt from passRequests) and are
+      // removed first; this replaces the cleanup that used to run on every startup. Every other
+      // relation is only enforced when it is already clean; nothing else is changed or deleted.
+      // Relations with orphans stay unenforced and show up in /api/platform/integrity.
+      id: '2026-11-13-foreign-keys',
+      run: async (conn) => {
+        await conn.execute(`DELETE FROM passRequestEmployees WHERE requestId NOT IN (SELECT id FROM passRequests)`);
+        await conn.execute(`DELETE FROM passRequestEmployees WHERE employeeId NOT IN (SELECT id FROM employees)`);
+        await conn.execute(`DELETE FROM passRequestAccessCodes WHERE requestId NOT IN (SELECT id FROM passRequests)`);
+        await conn.execute(`DELETE FROM passAccessCodes WHERE passId NOT IN (SELECT id FROM passes)`);
+        await conn.commit(); // ALTER TABLE commits implicitly on Oracle; make the cleanup explicit first
+        await enforceForeignKeys(conn, getDbEngine());
       }
     }
   ];

@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees } from "../requestLinks.ts";
+import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
@@ -59,6 +59,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
 
       if (!Array.isArray(employeeIds)) {
         return res.status(400).json({ error: "employeeIds must be an array" });
+      }
+      const missing = await findMissingEmployees(connection, employeeIds);
+      if (missing.length > 0) {
+        return res.status(400).json({ error: `Unknown employee(s): ${missing.slice(0, 5).join(', ')}` });
       }
 
       // Filter commonData to only include valid columns for passes table

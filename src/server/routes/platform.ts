@@ -11,10 +11,11 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
+import { integrityReport, enforceForeignKeys } from "../integrity.ts";
 
 // platform routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) {
-  const { bcrypt, oracledb, logAction, orgStatusCache, authorizePowerAdmin, getConnection, toCamelCase } = ctx;
+  const { bcrypt, oracledb, logAction, orgStatusCache, authorizePowerAdmin, getConnection, toCamelCase, getDbEngine } = ctx;
   // =========================================================================
   // --- SAAS BUSINESS ADMINISTRATION & MULTI-TENANT COMPANY LICENSING ---
   // Strictly Protected: Accessible exclusively to Global Power Admin (Software Vendor Root)
@@ -728,6 +729,46 @@ export function registerPlatformRoutes(app: express.Express, ctx: RouteContext) 
     } catch (err: any) {
       logger.error('Failed to reset admin password', { err: err });
       res.status(500).json({ error: err.message || "Failed to reset admin password" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  // Referential integrity report (read-only): orphan rows per relation and whether the database
+  // enforces it with a foreign key.
+  app.get("/api/platform/integrity", authorizePowerAdmin(), async (req, res) => {
+    let connection;
+    try {
+      connection = await getConnection();
+      const engine = getDbEngine();
+      const relations = await integrityReport(connection, engine);
+      res.json({
+        engine,
+        clean: relations.every(r => r.orphans === 0),
+        enforced: relations.filter(r => r.constraint === 'enforced').length,
+        total: relations.length,
+        relations
+      });
+    } catch (err: any) {
+      logger.error('Integrity report failed', { err: err });
+      res.status(500).json({ error: "Failed to build integrity report" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  // Adds the foreign keys for relations that are clean (never changes data). Run after cleaning up
+  // orphans the report listed; also runs once automatically as a data migration.
+  app.post("/api/platform/integrity/enforce", authorizePowerAdmin(), async (req, res) => {
+    let connection;
+    try {
+      connection = await getConnection();
+      const result = await enforceForeignKeys(connection, getDbEngine());
+      logAction(req, 'UPDATE', 'database', 'foreign-keys', `Foreign keys added: ${result.added.join(', ') || 'none'}`);
+      res.json(result);
+    } catch (err: any) {
+      logger.error('Enforcing foreign keys failed', { err: err });
+      res.status(500).json({ error: "Failed to add foreign keys" });
     } finally {
       if (connection) await connection.close();
     }
