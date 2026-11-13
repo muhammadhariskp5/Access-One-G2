@@ -143,6 +143,37 @@ export async function repairCaseMismatches(conn: any): Promise<{ name: string; f
   return fixed;
 }
 
+// Applications whose main pass (parentPassId) no longer exists: those passes were erased by an
+// old startup routine that deleted passes of removed employees. The link can't be restored, so it
+// is cleared, and the old pass ID is written to the application's history so nothing is lost.
+// Only references with no matching pass at all (not even ignoring case) are touched. The caller commits.
+export async function clearDanglingMainPassLinks(conn: any): Promise<number> {
+  const oracledb = (await import('oracledb')).default;
+  const res = await conn.execute(
+    `SELECT id, parentPassId FROM passRequests
+     WHERE parentPassId IS NOT NULL AND LENGTH(parentPassId) > 0
+       AND NOT EXISTS (SELECT 1 FROM passes p WHERE UPPER(p.id) = UPPER(passRequests.parentPassId))`,
+    {}, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+  );
+  const rows = (res.rows || []) as any[];
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const appId = String(row.ID ?? row.id);
+    const oldPass = String(row.PARENTPASSID ?? row.parentPassId);
+    await conn.execute(
+      `INSERT INTO requestHistory (id, requestId, userId, action, remarks, timestamp)
+       VALUES (:id, :requestId, :userId, 'DATA_REPAIR', :remarks, :ts)`,
+      {
+        id: crypto.randomUUID(), requestId: appId, userId: SYSTEM_USER_ID, ts: now,
+        remarks: `Main pass link cleared: pass ${oldPass} no longer exists (it was removed by an earlier software fault).`
+      }
+    );
+    await conn.execute(`UPDATE passRequests SET parentPassId = NULL WHERE id = :id`, [appId]);
+  }
+  if (rows.length) logger.info('[Integrity] dangling main-pass links cleared', { applications: rows.map(r => String(r.ID ?? r.id)) });
+  return rows.length;
+}
+
 // The reserved account that automatic actions (daily job, imports, system-created history) are
 // attributed to. It cannot log in: its password field is not a valid hash and it is never active.
 export async function ensureSystemUser(conn: any): Promise<void> {

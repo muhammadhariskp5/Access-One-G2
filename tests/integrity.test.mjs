@@ -155,3 +155,25 @@ test('an application ID typed in another case is stored in its real case', async
   assert.ok(hist.rows > 0);
   assert.equal(hist.orphans, 0);
 });
+
+test('applications whose main pass was erased get the link cleared, with the old ID kept in history', async () => {
+  await restartWith(db => {
+    const now = new Date().toISOString();
+    db.run(`INSERT INTO passRequests (id, status, employeeIds, employeeStatuses, parentPassId, createdAt, updatedAt)
+            VALUES ('GONEPARENT', 'completed', '[]', '{}', 'irzkdsxfj', :n, :n)`, { ':n': now });
+    db.run(`INSERT INTO passRequests (id, status, employeeIds, employeeStatuses, parentPassId, createdAt, updatedAt)
+            VALUES ('CASEPARENT', 'completed', '[]', '{}', :p, :n, :n)`, { ':p': passId.toUpperCase(), ':n': now });
+    db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-13-clear-dangling-main-pass-links'`);
+  });
+  await restartWith(db => {
+    const [gone] = db.rows(`SELECT parentPassId FROM passRequests WHERE id = 'GONEPARENT'`);
+    assert.equal(gone.parentPassId, null);
+    const [hist] = db.rows(`SELECT userId, action, remarks FROM requestHistory WHERE requestId = 'GONEPARENT'`);
+    assert.equal(hist.userId, 'system');
+    assert.equal(hist.action, 'DATA_REPAIR');
+    assert.match(hist.remarks, /irzkdsxfj/);
+    const [kept] = db.rows(`SELECT parentPassId FROM passRequests WHERE id = 'CASEPARENT'`);
+    assert.equal(kept.parentPassId, passId.toUpperCase(), 'a pass that exists (case aside) is not cleared');
+  });
+  assert.equal(rel(await report(), 'fk_req_parent').caseOnlyMismatches, 1);
+});

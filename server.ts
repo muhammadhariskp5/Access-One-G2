@@ -8,7 +8,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees } from "./src/server/requestLinks.ts";
-import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches } from "./src/server/integrity.ts";
+import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches, clearDanglingMainPassLinks } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "./src/server/realtime.ts";
@@ -1678,6 +1678,17 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       run: async (conn) => {
         await ensureSystemUser(conn);
         await repairCaseMismatches(conn);
+        await conn.commit();
+        await enforceForeignKeys(conn, getDbEngine());
+      }
+    },
+    {
+      // Production report (2026-11-13): 4 applications pointed at 2 main passes that the old
+      // startup routine had erased. Clear those links (old IDs kept in each application's
+      // history), then protect the last relation.
+      id: '2026-11-13-clear-dangling-main-pass-links',
+      run: async (conn) => {
+        await clearDanglingMainPassLinks(conn);
         await conn.commit();
         await enforceForeignKeys(conn, getDbEngine());
       }
