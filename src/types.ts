@@ -162,6 +162,9 @@ export interface UserViewPreferences {
   itemsPerPage?: number;
   enableSound?: boolean;
   expiryWarningDays?: number;
+  // Access Matrix: keep showing passes that expired within this many days (0 = hide), as a
+  // reminder to re-apply
+  matrixExpiredDays?: number;
   badgeStyle?: 'minimal' | 'bold';
   applicationColumns?: string[];
   personnelColumns?: string[];

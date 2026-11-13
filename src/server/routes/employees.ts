@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees } from "../requestLinks.ts";
+import { cancelEmployeesOnApplications, syncRequestEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
@@ -398,10 +398,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
       );
 
       // Auto-cancel application member entries
-      await connection.execute(
-        `UPDATE passRequestEmployees SET status = 'cancelled' WHERE employeeId IN (${placeholders}) AND status IN ('processing', 'approved', 'pending')`,
-        ids
-      );
+      await cancelEmployeesOnApplications(connection, ids, String(req.headers['x-user-id'] || ''));
 
       await connection.execute(
         `UPDATE employees SET deletedAt = '${new Date().toISOString()}', status = 'inactive' WHERE id IN (${placeholders})`,
@@ -431,10 +428,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
       );
 
       // Auto-cancel application member entries
-      await connection.execute(
-        `UPDATE passRequestEmployees SET status = 'cancelled' WHERE employeeId = :empId AND status IN ('processing', 'approved', 'pending')`,
-        [empId]
-      );
+      await cancelEmployeesOnApplications(connection, [empId], String(req.headers['x-user-id'] || ''));
 
       // Soft delete: keep the person's record so their pass history stays meaningful
       await connection.execute(

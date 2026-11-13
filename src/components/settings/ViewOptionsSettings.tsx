@@ -31,6 +31,7 @@ const DEFAULT_PREFERENCES: UserViewPreferences = {
   itemsPerPage: 25,
   enableSound: true,
   expiryWarningDays: 30,
+  matrixExpiredDays: 30,
   badgeStyle: 'bold'
 };
 
@@ -282,6 +283,34 @@ export function ViewOptionsSettings({ currentUser, onSuccess, showToast }: ViewO
                 )}
               >
                 {days}d
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Recently expired passes on the Access Matrix */}
+        <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-2xs space-y-3">
+          <div className="flex items-center gap-2 text-slate-800 font-bold text-xs">
+            <Clock size={16} className="text-[#800020]" />
+            <span>Show Expired Passes in Access Matrix</span>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Keep passes that expired within this many days visible in the matrix (in red), as a reminder to re-apply. They disappear once a renewal replaces them.
+          </p>
+          <div className="grid grid-cols-6 gap-2 pt-1">
+            {[0, 30, 60, 90, 180, 365].map(days => (
+              <button
+                key={days}
+                type="button"
+                onClick={() => setPreferences({ ...preferences, matrixExpiredDays: days })}
+                className={cn(
+                  "py-2 rounded-lg border text-center text-xs font-bold transition-all cursor-pointer",
+                  (preferences.matrixExpiredDays ?? 30) === days
+                    ? "border-[#800020] bg-[#800020] text-white shadow-xs"
+                    : "border-slate-200 hover:border-slate-300 text-slate-700 bg-slate-50/50"
+                )}
+              >
+                {days === 0 ? 'Off' : `${days}d`}
               </button>
             ))}
           </div>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { Shield, Filter, ChevronRight, CheckCircle2, XCircle, Clock, ArrowUpDown, ArrowUp, ArrowDown, Calendar, Printer, Download, FileSpreadsheet, Columns, Layers, SlidersHorizontal } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -58,6 +58,27 @@ const isNotReplacedPass = (p: Pass) => {
   return s !== 'replaced' && s !== 'superseded' && !r.includes('replaced') && s !== 'rejected' && s !== 'cancelled' && s !== 'revoked';
 };
 
+// Expired (not replaced, revoked, cancelled or rejected) within the last `days` days: kept on the
+// matrix as a reminder to re-apply. A renewal marks the old pass 'replaced', which removes it.
+const isRecentlyExpired = (p: Pass, days: number) => {
+  if (days <= 0 || !isPassExpired(p) || isPassReplaced(p)) return false;
+  const s = String(p.status || '').toLowerCase().trim();
+  if (s === 'revoked' || s === 'cancelled' || s === 'rejected' || s === 'draft') return false;
+  const ended = parseToYMD(p.expiryDate) || parseToYMD(p.updatedAt);
+  if (!ended) return false;
+  const cutoff = parseToYMD(new Date(Date.now() - days * 86400000));
+  return !!cutoff && ended >= cutoff;
+};
+
+const readMatrixExpiredDays = (currentUser: UserProfile | null | undefined): number => {
+  try {
+    const stored = JSON.parse(localStorage.getItem('accessone_view_preferences') || '{}');
+    if (typeof stored.matrixExpiredDays === 'number') return stored.matrixExpiredDays;
+  } catch { /* ignore */ }
+  const fromProfile = (currentUser?.preferences as any)?.matrixExpiredDays;
+  return typeof fromProfile === 'number' ? fromProfile : 30;
+};
+
 const isActivePassStatus = (status: string) => {
   const resolved = resolvePersonnelStatus(undefined, status);
   const s = String(status || '').toLowerCase().trim();
@@ -85,6 +106,49 @@ export function AccessMatrix({
   globalSearch = '' 
 }: AccessMatrixProps) {
   const [filterStatus, setFilterStatus] = useState<string>('active');
+  // User setting (Settings > Display): how long expired passes stay on the default view
+  const [expiredWindowDays, setExpiredWindowDays] = useState<number>(() => readMatrixExpiredDays(currentUser));
+  useEffect(() => { setExpiredWindowDays(readMatrixExpiredDays(currentUser)); }, [currentUser]);
+  useEffect(() => {
+    const onPrefs = (e: Event) => {
+      const days = (e as CustomEvent).detail?.matrixExpiredDays;
+      if (typeof days === 'number') setExpiredWindowDays(days);
+    };
+    window.addEventListener('view_preferences_updated', onPrefs);
+    return () => window.removeEventListener('view_preferences_updated', onPrefs);
+  }, []);
+  const showsRecentExpired = (filterStatus === 'active' || filterStatus === 'all') && expiredWindowDays > 0;
+
+  // What one matrix cell shows: the latest valid pass per type/code set; otherwise (when the view
+  // asks for it) the latest expired pass at that location.
+  const cellPasses = (empPasses: Pass[], validActivePasses: Pass[], locId: string) => {
+    const activeLocPasses = validActivePasses.filter(p => p.locationId === locId);
+    let relevantPasses: Pass[] = [];
+    if (activeLocPasses.length > 0) {
+      const map = new Map<string, Pass>();
+      const sortedByDate = [...activeLocPasses].sort((a, b) =>
+        new Date(a.updatedAt || a.createdAt || 0).getTime() - new Date(b.updatedAt || b.createdAt || 0).getTime()
+      );
+      sortedByDate.forEach(pass => {
+        const key = pass.type === 'main' ? 'main' : `supp-${[...(pass.accessCodes || [])].sort().join(',')}`;
+        map.set(key, pass);
+      });
+      relevantPasses = Array.from(map.values());
+    } else if (filterStatus === 'expired' || filterStatus === 'all_records' || showsRecentExpired) {
+      const expiredLocPasses = empPasses.filter(p =>
+        p.locationId === locId && isPassExpired(p) && !isPassReplaced(p) &&
+        (filterStatus === 'expired' || filterStatus === 'all_records' || isRecentlyExpired(p, expiredWindowDays))
+      );
+      if (expiredLocPasses.length > 0) {
+        const latestExpired = [...expiredLocPasses].sort((a, b) =>
+          new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
+        )[0];
+        relevantPasses = [latestExpired];
+      }
+    }
+    const sortedPasses = [...relevantPasses].sort((a, b) => (a.type === 'main' ? -1 : 1));
+    return { sortedPasses, latestPass: sortedPasses[0] as Pass | undefined };
+  };
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [startDateFilter, setStartDateFilter] = useState<string>('');
   const [endDateFilter, setEndDateFilter] = useState<string>('');
@@ -391,34 +455,7 @@ export function AccessMatrix({
 
       activeCategories.forEach(cat => {
         groupedLocations[cat.id]?.forEach(loc => {
-          const activeLocPasses = validActivePasses.filter(p => p.locationId === loc.id);
-
-          let relevantPasses: Pass[] = [];
-
-          if (activeLocPasses.length > 0) {
-            const map = new Map<string, Pass>();
-            const sortedByDate = [...activeLocPasses].sort((a, b) => 
-              new Date(a.updatedAt || a.createdAt || 0).getTime() - new Date(b.updatedAt || b.createdAt || 0).getTime()
-            );
-            sortedByDate.forEach(pass => {
-              const key = pass.type === 'main' ? 'main' : `supp-${[...(pass.accessCodes || [])].sort().join(',')}`;
-              map.set(key, pass);
-            });
-            relevantPasses = Array.from(map.values());
-          } else if (filterStatus === 'expired' || filterStatus === 'all_records') {
-            const expiredLocPasses = empPasses.filter(p => 
-              p.locationId === loc.id && isPassExpired(p) && !isPassReplaced(p)
-            );
-            if (expiredLocPasses.length > 0) {
-              const latestExpired = [...expiredLocPasses].sort((a, b) => 
-                new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
-              )[0];
-              relevantPasses = [latestExpired];
-            }
-          }
-
-          const sortedPasses = [...relevantPasses].sort((a, b) => (a.type === 'main' ? -1 : 1));
-          const latestPass = sortedPasses[0];
+          const { sortedPasses, latestPass } = cellPasses(empPasses, validActivePasses, loc.id);
 
           if (sortedPasses.length > 0) {
             const codes = sortedPasses.map(p => {
@@ -481,12 +518,14 @@ export function AccessMatrix({
       const validActivePasses = empAllPasses.filter(p => isPassValidAndActive(p));
       const expiredPasses = empAllPasses.filter(p => isPassExpired(p) && !isPassReplaced(p) && (p.status || '').toLowerCase() !== 'rejected' && (p.status || '').toLowerCase() !== 'cancelled');
       const replacedPasses = empAllPasses.filter(p => isPassReplaced(p));
+      const recentExpiredPasses = showsRecentExpired ? empAllPasses.filter(p => isRecentlyExpired(p, expiredWindowDays)) : [];
 
       // 1. Status Filter Validation
       const normFilter = filterStatus.toLowerCase();
       if (normFilter === 'active' || normFilter === 'all') {
-        // Must have at least ONE valid, active, unexpired pass
-        if (validActivePasses.length === 0) return false;
+        // Must have at least ONE valid, active, unexpired pass, or one that expired recently
+        // (within the user's chosen window) and still needs re-applying
+        if (validActivePasses.length === 0 && recentExpiredPasses.length === 0) return false;
       } else if (normFilter === 'expired') {
         // Must have at least one expired pass
         if (expiredPasses.length === 0) return false;
@@ -504,7 +543,7 @@ export function AccessMatrix({
       // Relevant passes for search and category filtering
       const relevantPasses = normFilter === 'expired' 
         ? expiredPasses 
-        : (normFilter === 'replaced' ? replacedPasses : (validActivePasses.length > 0 ? validActivePasses : empAllPasses));
+        : (normFilter === 'replaced' ? replacedPasses : (validActivePasses.length + recentExpiredPasses.length > 0 ? [...validActivePasses, ...recentExpiredPasses] : empAllPasses));
 
       // 2. Search matching
       let matchesSearch = true;
@@ -559,7 +598,7 @@ export function AccessMatrix({
       if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [employees, passes, locations, globalSearch, filterStatus, filterCategory, sortField, sortOrder, startDateFilter, endDateFilter, columnConfigs]);
+  }, [employees, passes, locations, globalSearch, filterStatus, filterCategory, sortField, sortOrder, startDateFilter, endDateFilter, columnConfigs, showsRecentExpired, expiredWindowDays]);
 
   return (
     <div className="space-y-4 flex-1 flex flex-col w-full min-h-0 h-[calc(100vh-90px)]">
@@ -583,7 +622,7 @@ export function AccessMatrix({
             onChange={(e) => setFilterStatus(e.target.value)}
             className="px-3 py-1.5 bg-white border border-[#E5E7EB] rounded-xl text-[10px] font-bold outline-none focus:ring-1 focus:ring-[#800020]"
           >
-            <option value="active">Valid Active Passes (Default)</option>
+            <option value="active">{expiredWindowDays > 0 ? `Valid + Expired in last ${expiredWindowDays} days (Default)` : 'Valid Active Passes (Default)'}</option>
             <option value="expired">Expired Passes Only</option>
             <option value="no_valid_pass">Personnel Without Valid Pass</option>
             <option value="replaced">Replaced Passes Only</option>
@@ -812,38 +851,7 @@ export function AccessMatrix({
                     
                     return activeCategories.map(cat => {
                       return groupedLocations[cat.id].map(loc => {
-                        const activeLocPasses = validActivePasses.filter(p => p.locationId === loc.id);
-                        
-                        let relevantPasses: Pass[] = [];
-
-                        if (activeLocPasses.length > 0) {
-                          // Deduplicate: Keep only the latest pass per pass type / access code set
-                          const map = new Map<string, Pass>();
-                          const sortedByDate = [...activeLocPasses].sort((a, b) => 
-                            new Date(a.updatedAt || a.createdAt || 0).getTime() - new Date(b.updatedAt || b.createdAt || 0).getTime()
-                          );
-                          
-                          sortedByDate.forEach(pass => {
-                            const key = pass.type === 'main' ? 'main' : `supp-${[...(pass.accessCodes || [])].sort().join(',')}`;
-                            map.set(key, pass);
-                          });
-
-                          relevantPasses = Array.from(map.values());
-                        } else if (filterStatus === 'expired' || filterStatus === 'all_records') {
-                          const expiredLocPasses = empPasses.filter(p => 
-                            p.locationId === loc.id && isPassExpired(p) && !isPassReplaced(p)
-                          );
-                          if (expiredLocPasses.length > 0) {
-                            const latestExpired = [...expiredLocPasses].sort((a, b) => 
-                              new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
-                            )[0];
-                            relevantPasses = [latestExpired];
-                          }
-                        }
-                        
-                        // Sort passes so 'main' comes first
-                        const sortedPasses = [...relevantPasses].sort((a, b) => (a.type === 'main' ? -1 : 1));
-                        const latestPass = sortedPasses[0];
+                        const { sortedPasses, latestPass } = cellPasses(empPasses, validActivePasses, loc.id);
  
                       return (
                         <React.Fragment key={loc.id}>
@@ -862,8 +870,8 @@ export function AccessMatrix({
                                       className={cn(
                                         "px-1.5 py-0.5 rounded-full text-[9px] font-bold border transition-colors relative",
                                         isMain 
-                                          ? (isExpired ? "bg-gray-100 text-gray-500 border-gray-200 line-through opacity-70" : "bg-orange-500 text-white border-orange-600")
-                                          : (isExpired ? "bg-gray-100 text-gray-400 border-gray-200 line-through opacity-70" : "bg-gray-200 text-gray-700 border-gray-300"),
+                                          ? (isExpired ? "bg-rose-50 text-rose-700 border-rose-200 line-through" : "bg-orange-500 text-white border-orange-600")
+                                          : (isExpired ? "bg-rose-50 text-rose-600 border-rose-200 line-through" : "bg-gray-200 text-gray-700 border-gray-300"),
                                         isExpired && "opacity-70"
                                       )}
                                       title={`${isMain ? 'Main' : 'Supplementary'} Pass - ${statusLabel}${isExpired ? ' (Expired)' : ''}`}
@@ -1038,33 +1046,7 @@ export function AccessMatrix({
                       })}
                       {activeCategories.map(cat => 
                         groupedLocations[cat.id]?.map(loc => {
-                          const activeLocPasses = validActivePasses.filter(p => p.locationId === loc.id);
-                          
-                          let relevantPasses: Pass[] = [];
-                          if (activeLocPasses.length > 0) {
-                            const map = new Map<string, Pass>();
-                            const sortedByDate = [...activeLocPasses].sort((a, b) => 
-                              new Date(a.updatedAt || a.createdAt || 0).getTime() - new Date(b.updatedAt || b.createdAt || 0).getTime()
-                            );
-                            sortedByDate.forEach(pass => {
-                              const key = pass.type === 'main' ? 'main' : `supp-${[...(pass.accessCodes || [])].sort().join(',')}`;
-                              map.set(key, pass);
-                            });
-                            relevantPasses = Array.from(map.values());
-                          } else if (filterStatus === 'expired' || filterStatus === 'all_records') {
-                            const expiredLocPasses = empPasses.filter(p => 
-                              p.locationId === loc.id && isPassExpired(p) && !isPassReplaced(p)
-                            );
-                            if (expiredLocPasses.length > 0) {
-                              const latestExpired = [...expiredLocPasses].sort((a, b) => 
-                                new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
-                              )[0];
-                              relevantPasses = [latestExpired];
-                            }
-                          }
-
-                          const sortedPasses = [...relevantPasses].sort((a, b) => (a.type === 'main' ? -1 : 1));
-                          const latestPass = sortedPasses[0];
+                          const { sortedPasses, latestPass } = cellPasses(empPasses, validActivePasses, loc.id);
 
                           return (
                             <React.Fragment key={loc.id}>
