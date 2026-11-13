@@ -11,16 +11,40 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
+import { parseEmployeeListQuery, buildEmployeeFilter, orderBy, pageClause, duplicateReasonsFor, countDuplicates, EMPLOYEE_EXPORT_MAX } from "../employeeQuery.ts";
 
 // employees routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) {
-  const { oracledb, logAction, authorize, validateEmployeeReferences, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, normalizeDateStr } = ctx;
+  const { oracledb, logAction, authorize, validateEmployeeReferences, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, normalizeDateStr, getDbEngine } = ctx;
   // --- Data Endpoints ---
   app.get("/api/employees", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {
       connection = await getConnection();
       const { orgId } = await getTenantOrgId(req, connection);
+
+      // Paged mode (the Employees page): ?page=&pageSize=&q=&type=&status=&division=&department=
+      // &project=&duplicates=1&sort=&order=  or  &all=1 for export/print.
+      // Returns { items, total, page, pageSize, duplicateCount }.
+      if (req.query.page !== undefined || req.query.all !== undefined) {
+        const f = parseEmployeeListQuery(req.query as Record<string, unknown>);
+        const { where, binds } = buildEmployeeFilter(f, orgId || null);
+        const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+        const countRes = await connection.execute(`SELECT COUNT(*) AS cnt FROM employees WHERE ${where}`, binds, opts);
+        const total = Number((countRes.rows?.[0] as any)?.CNT ?? (countRes.rows?.[0] as any)?.cnt ?? 0);
+        const limit = f.all ? EMPLOYEE_EXPORT_MAX : f.pageSize;
+        const offset = f.all ? 0 : (f.page - 1) * f.pageSize;
+        const rowsRes = await connection.execute(
+          `SELECT * FROM employees WHERE ${where} ${orderBy(f)} ${pageClause(getDbEngine(), offset, limit)}`,
+          binds, opts
+        );
+        const items = (rowsRes.rows || []).map(toCamelCase);
+        const reasons = await duplicateReasonsFor(connection, items.map((e: any) => e.id), orgId || null);
+        for (const e of items as any[]) if (reasons[e.id]) e.duplicateReasons = reasons[e.id];
+        const duplicateCount = await countDuplicates(connection, orgId || null);
+        return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit, duplicateCount });
+      }
+
       let sql = `SELECT * FROM employees WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId) {

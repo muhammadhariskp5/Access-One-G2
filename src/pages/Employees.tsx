@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Plus, Filter, User, Mail, Phone, MapPin, Briefcase, ChevronRight, MoreVertical, Trash2, Edit2, FileText, ExternalLink, Upload, Loader2, ArrowUpDown, ArrowUp, ArrowDown, Copy, Printer, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
+import { ListedEmployee, useEmployeeList } from '../hooks/useEmployeeList';
 import { Employee, UserProfile, Division, Department, Project, Pass, PassApplication } from '../types';
 import { apiFetch, cn, formatDate } from '../lib/utils';
 import { Modal } from '../components/common/Modal';
@@ -53,60 +54,6 @@ export function Employees({
   const [sortField, setSortField] = useState<string>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
 
-  // Identify duplicate personnel based on Name, Employee Code, QID/Visa, or Passport
-  const duplicateMap = useMemo(() => {
-    const nameCounts: Record<string, string[]> = {};
-    const codeCounts: Record<string, string[]> = {};
-    const qidCounts: Record<string, string[]> = {};
-    const passportCounts: Record<string, string[]> = {};
-
-    employees.forEach(emp => {
-      if (emp.name && emp.name.trim()) {
-        const k = emp.name.trim().toLowerCase();
-        nameCounts[k] = [...(nameCounts[k] || []), emp.id];
-      }
-      if (emp.employeeId && emp.employeeId.trim()) {
-        const k = emp.employeeId.trim().toLowerCase();
-        codeCounts[k] = [...(codeCounts[k] || []), emp.id];
-      }
-      const qid = emp.qatarId || emp.visaNumber || emp.qidVisaNumber;
-      if (qid && qid.trim()) {
-        const k = qid.trim().toLowerCase();
-        qidCounts[k] = [...(qidCounts[k] || []), emp.id];
-      }
-      if (emp.passportNumber && emp.passportNumber.trim()) {
-        const k = emp.passportNumber.trim().toLowerCase();
-        passportCounts[k] = [...(passportCounts[k] || []), emp.id];
-      }
-    });
-
-    const duplicateEmpIds = new Set<string>();
-    const duplicateReasons: Record<string, string[]> = {};
-
-    const addReason = (empId: string, reason: string) => {
-      duplicateEmpIds.add(empId);
-      if (!duplicateReasons[empId]) duplicateReasons[empId] = [];
-      if (!duplicateReasons[empId].includes(reason)) {
-        duplicateReasons[empId].push(reason);
-      }
-    };
-
-    Object.entries(nameCounts).forEach(([_, ids]) => {
-      if (ids.length > 1) ids.forEach(id => addReason(id, 'Duplicate Name'));
-    });
-    Object.entries(codeCounts).forEach(([_, ids]) => {
-      if (ids.length > 1) ids.forEach(id => addReason(id, 'Duplicate Code'));
-    });
-    Object.entries(qidCounts).forEach(([_, ids]) => {
-      if (ids.length > 1) ids.forEach(id => addReason(id, 'Duplicate QID/Visa'));
-    });
-    Object.entries(passportCounts).forEach(([_, ids]) => {
-      if (ids.length > 1) ids.forEach(id => addReason(id, 'Duplicate Passport'));
-    });
-
-    return { duplicateEmpIds, duplicateReasons };
-  }, [employees]);
-
   const handleSort = (field: string) => {
     if (sortField === field) {
       setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -115,138 +62,66 @@ export function Employees({
       setSortOrder('asc');
     }
   };
-  
-  // Infinite Scroll State
-  const [visibleCount, setVisibleCount] = useState(40);
-  const [isScrolling, setIsScrolling] = useState(false);
+
+  // Search, filters, duplicate detection, sorting and paging run in the database; the page
+  // only holds the rows loaded so far and fetches the next page as you scroll.
+  const {
+    items: visibleEmployees,
+    total: totalMatching,
+    duplicateCount,
+    loading: listLoading,
+    loadingMore: isScrolling,
+    hasMore,
+    loadMore,
+    reload: reloadList,
+    fetchAll: fetchAllMatching
+  } = useEmployeeList({
+    q: globalSearch,
+    type: filterType,
+    status: filterStatus,
+    division: filterDivision,
+    department: filterDepartment,
+    project: filterProject,
+    duplicates: filterDuplicatesOnly,
+    sort: sortField,
+    order: sortOrder
+  });
+
   const observerTarget = useRef<HTMLDivElement>(null);
-
-  const filteredEmployees = useMemo(() => {
-    const s = globalSearch.toLowerCase();
-    const list = employees.filter(emp => {
-      if (filterDuplicatesOnly && !duplicateMap.duplicateEmpIds.has(emp.id)) {
-        return false;
-      }
-
-      const matchesSearch = (
-        emp.name?.toLowerCase().includes(s) ||
-        emp.employeeId?.toLowerCase().includes(s) ||
-        emp.department?.toLowerCase().includes(s) ||
-        emp.division?.toLowerCase().includes(s) ||
-        emp.project?.toLowerCase().includes(s) ||
-        emp.jobTitle?.toLowerCase().includes(s) ||
-        emp.email?.toLowerCase().includes(s) ||
-        emp.qatarId?.toLowerCase().includes(s) ||
-        emp.visaNumber?.toLowerCase().includes(s) ||
-        emp.qidVisaNumber?.toLowerCase().includes(s) ||
-        emp.passportNumber?.toLowerCase().includes(s)
-      );
-      const matchesType = filterType === 'all' || 
-        emp.employeeType === filterType || 
-        emp.employeeType?.toLowerCase() === filterType.toLowerCase() ||
-        (filterType === 'External Sponsor' && emp.employeeType?.toLowerCase().includes('sponsor')) ||
-        (filterType === 'Externally Working' && emp.employeeType?.toLowerCase().includes('working'));
-      
-      const matchesStatus = filterStatus === 'all' || 
-        emp.status?.toLowerCase() === filterStatus.toLowerCase();
-      
-      const matchesDivision = filterDivision === 'all' || 
-        emp.division === filterDivision || 
-        emp.division?.toLowerCase() === filterDivision.toLowerCase() ||
-        divisions.find(d => d.id === emp.division)?.name?.toLowerCase() === filterDivision.toLowerCase();
-      
-      const matchesDepartment = filterDepartment === 'all' || 
-        emp.department === filterDepartment || 
-        emp.department?.toLowerCase() === filterDepartment.toLowerCase() ||
-        departments.find(d => d.id === emp.department)?.name?.toLowerCase() === filterDepartment.toLowerCase();
-      
-      const matchesProject = filterProject === 'all' || 
-        emp.project === filterProject || 
-        emp.project?.toLowerCase() === filterProject.toLowerCase() ||
-        projects.find(p => p.id === emp.project)?.name?.toLowerCase() === filterProject.toLowerCase();
-      
-      return matchesSearch && matchesType && matchesStatus && matchesDivision && matchesDepartment && matchesProject;
-    });
-
-    return list.sort((a, b) => {
-      let valA: any = '';
-      let valB: any = '';
-      if (sortField === 'code') {
-        valA = a.employeeId || '';
-        valB = b.employeeId || '';
-      } else if (sortField === 'name') {
-        valA = a.name || '';
-        valB = b.name || '';
-      } else if (sortField === 'jobTitle') {
-        valA = a.jobTitle || '';
-        valB = b.jobTitle || '';
-      } else if (sortField === 'type') {
-        valA = a.employeeType || '';
-        valB = b.employeeType || '';
-      } else if (sortField === 'status') {
-        valA = a.status || '';
-        valB = b.status || '';
-      } else if (sortField === 'division') {
-        valA = a.division || '';
-        valB = b.division || '';
-      } else if (sortField === 'department') {
-        valA = a.department || '';
-        valB = b.department || '';
-      } else if (sortField === 'qidNumber') {
-        valA = a.qidVisaNumber || a.qatarId || a.visaNumber || '';
-        valB = b.qidVisaNumber || b.qatarId || b.visaNumber || '';
-      } else if (sortField === 'qidExpiry' || sortField === 'expiry') {
-        valA = a.qidVisaExpiry || a.visaExpiry || '';
-        valB = b.qidVisaExpiry || b.visaExpiry || '';
-      } else if (sortField === 'passportNumber') {
-        valA = a.passportNumber || '';
-        valB = b.passportNumber || '';
-      } else if (sortField === 'passportExpiry' || sortField === 'passport') {
-        valA = a.passportExpiry || '';
-        valB = b.passportExpiry || '';
-      } else if (sortField === 'induction') {
-        valA = a.safetyInductionDate || '';
-        valB = b.safetyInductionDate || '';
-      }
-
-      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
-      return 0;
-    });
-  }, [employees, globalSearch, filterType, filterStatus, filterDivision, filterDepartment, filterProject, filterDuplicatesOnly, duplicateMap, sortField, sortOrder]);
-
-  const visibleEmployees = useMemo(() => {
-    return filteredEmployees.slice(0, visibleCount);
-  }, [filteredEmployees, visibleCount]);
-
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && visibleCount < filteredEmployees.length) {
-          setIsScrolling(true);
-          setTimeout(() => {
-            setVisibleCount(prev => prev + 40);
-            setIsScrolling(false);
-          }, 300);
-        }
+        if (entries[0].isIntersecting && hasMore) loadMore();
       },
       { threshold: 1.0 }
     );
-
-    if (observerTarget.current) {
-      observer.observe(observerTarget.current);
-    }
-
+    if (observerTarget.current) observer.observe(observerTarget.current);
     return () => observer.disconnect();
-  }, [filteredEmployees.length, visibleCount]);
+  }, [hasMore, loadMore]);
 
-  // Reset scroll when filters change
+  // Selections only apply to what's on screen; clear them when the result set changes.
   useEffect(() => {
-    setVisibleCount(40);
+    setSelectedIds([]);
   }, [globalSearch, filterType, filterStatus, filterDivision, filterDepartment, filterProject, filterDuplicatesOnly]);
 
+  const refreshAfterChange = () => {
+    reloadList();
+    onSuccess();
+  };
+
+  // Export and print use every matching row, fetched when needed (not kept in memory).
+  const [printRows, setPrintRows] = useState<ListedEmployee[]>([]);
+  const openPrint = async () => {
+    try {
+      setPrintRows(await fetchAllMatching());
+      setIsPrintModalOpen(true);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load personnel for printing', 'error');
+    }
+  };
+
   const handleDelete = (id: string) => {
-    const emp = employees.find(e => e.id === id);
+    const emp = visibleEmployees.find(e => e.id === id);
     const empName = emp?.name || 'this employee';
     const activeEmpPasses = passes.filter(p => p.employeeId === id && ['active', 'approved', 'collected', 'processing'].includes(p.status));
     const activeEmpApps = applications.filter(a => a.employeeIds?.includes(id) && ['pending', 'approved', 'accepted', 'processing'].includes(a.status));
@@ -264,7 +139,7 @@ export function Employees({
           const res = await apiFetch(`/api/employees/${id}`, { method: 'DELETE' });
           if (res.ok) {
             showToast("Employee deleted and associated passes cancelled successfully");
-            onSuccess();
+            refreshAfterChange();
           }
         } catch (err: any) {
           showToast(err.message, 'error');
@@ -287,7 +162,7 @@ export function Employees({
           if (res.ok) {
             showToast(`Updated ${selectedIds.length} personnel successfully`);
             setSelectedIds([]);
-            onSuccess();
+            refreshAfterChange();
           }
         } catch (err: any) {
           showToast(err.message, 'error');
@@ -310,7 +185,7 @@ export function Employees({
           if (res.ok) {
             showToast(`Deleted ${selectedIds.length} personnel successfully`);
             setSelectedIds([]);
-            onSuccess();
+            refreshAfterChange();
           }
         } catch (err: any) {
           showToast(err.message, 'error');
@@ -348,7 +223,14 @@ export function Employees({
     setFilterDuplicatesOnly(false);
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
+    let filteredEmployees: ListedEmployee[];
+    try {
+      filteredEmployees = await fetchAllMatching();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load personnel for export', 'error');
+      return;
+    }
     const workbook = XLSX.utils.book_new();
 
     const headers = [
@@ -371,7 +253,7 @@ export function Employees({
       (index + 1).toString(),
       emp.employeeId || 'N/A',
       emp.name || '',
-      emp.employeeType || emp.type || 'Internal',
+      emp.employeeType || (emp as any).type || 'Internal',
       emp.division || emp.department || 'N/A',
       emp.department || 'N/A',
       emp.project || 'N/A',
@@ -419,7 +301,7 @@ export function Employees({
             <div className="w-1.5 h-1.5 rounded-full bg-[#800020]"></div>
             <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Personnel Directory</p>
             <span className="px-2 py-0.5 bg-[#F3F4F6] text-[#6B7280] rounded-full text-[9px] font-bold">
-              {filteredEmployees.length} Total
+              {totalMatching} Total
             </span>
             {selectedIds.length > 0 && (
               <span className="px-2 py-0.5 bg-[#800020] text-white rounded-full text-[9px] font-bold">
@@ -439,7 +321,7 @@ export function Employees({
             </button>
 
             <button 
-              onClick={() => setIsPrintModalOpen(true)}
+              onClick={openPrint}
               className="px-2.5 py-1.5 bg-white border border-[#E5E7EB] text-[#800020] hover:bg-rose-50 hover:border-rose-200 rounded-lg font-bold text-[9px] uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
               title="Print or Export current personnel view to PDF with styling & colors"
             >
@@ -557,12 +439,12 @@ export function Employees({
             >
               <Copy size={12} />
               <span>Find Duplicates</span>
-              {duplicateMap.duplicateEmpIds.size > 0 && (
+              {duplicateCount > 0 && (
                 <span className={cn(
                   "px-1.5 py-0.2 rounded-full text-[9px] font-extrabold",
                   filterDuplicatesOnly ? "bg-white text-rose-700" : "bg-rose-100 text-rose-800"
                 )}>
-                  {duplicateMap.duplicateEmpIds.size}
+                  {duplicateCount}
                 </span>
               )}
             </button>
@@ -872,12 +754,12 @@ export function Employees({
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <p className="text-sm font-bold text-[#1A1A1A] truncate">{emp.name}</p>
-                              {duplicateMap.duplicateReasons[emp.id] && (
+                              {emp.duplicateReasons && (
                                 <span 
                                   className="px-1.5 py-0.5 bg-rose-50 text-rose-700 border border-rose-200 rounded text-[8px] font-extrabold uppercase shrink-0" 
-                                  title={duplicateMap.duplicateReasons[emp.id].join(', ')}
+                                  title={emp.duplicateReasons.join(', ')}
                                 >
-                                  {duplicateMap.duplicateReasons[emp.id][0]}
+                                  {emp.duplicateReasons[0]}
                                 </span>
                               )}
                             </div>
@@ -1022,7 +904,7 @@ export function Employees({
         </div>
       </div>
 
-      {filteredEmployees.length === 0 && (
+      {!listLoading && totalMatching === 0 && (
         <div className="p-20 text-center bg-white rounded-3xl border border-dashed border-[#E5E7EB]">
           <div className="w-16 h-16 bg-[#F9FAFB] rounded-full flex items-center justify-center mx-auto mb-4">
             <User size={32} className="text-[#9CA3AF] opacity-20" />
@@ -1085,13 +967,13 @@ export function Employees({
         isOpen={isPrintModalOpen}
         onClose={() => setIsPrintModalOpen(false)}
         title="Print Personnel Directory / Export PDF"
-        documentTitle={`Personnel Directory - ${filteredEmployees.length} Records`}
+        documentTitle={`Personnel Directory - ${printRows.length} Records`}
       >
         <div className="space-y-4">
           <div className="flex justify-between items-center border-b border-[#E5E7EB] pb-3">
             <div>
               <h2 className="text-base font-black text-[#800020] uppercase tracking-tight">Personnel Directory Report</h2>
-              <p className="text-[10px] text-[#6B7280] font-bold">Showing {filteredEmployees.length} filtered personnel records</p>
+              <p className="text-[10px] text-[#6B7280] font-bold">Showing {printRows.length} filtered personnel records</p>
             </div>
             <div className="text-right">
               <span className="px-2.5 py-1 bg-rose-50 text-[#800020] rounded-lg text-[9px] font-extrabold uppercase border border-rose-200">
@@ -1117,7 +999,7 @@ export function Employees({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
-                {filteredEmployees.slice(0, 100).map((emp, idx) => (
+                {printRows.slice(0, 100).map((emp, idx) => (
                   <tr key={emp.id} className={cn("text-[9px]", idx % 2 === 0 ? "bg-white" : "bg-[#F9FAFB]")}>
                     <td className="p-2 text-center font-bold text-gray-500 border-r border-gray-200">{idx + 1}</td>
                     <td className="p-2 font-bold text-[#800020]">{emp.employeeId || 'N/A'}</td>
@@ -1140,9 +1022,9 @@ export function Employees({
                 ))}
               </tbody>
             </table>
-            {filteredEmployees.length > 100 && (
+            {printRows.length > 100 && (
               <p className="text-[10px] font-bold text-[#9CA3AF] text-center mt-3 uppercase tracking-wider">
-                Showing first 100 of {filteredEmployees.length} personnel records
+                Showing first 100 of {printRows.length} personnel records
               </p>
             )}
           </div>
