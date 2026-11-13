@@ -9,6 +9,8 @@ import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees } from "./src/server/requestLinks.ts";
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
+import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
+import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches, clearDanglingMainPassLinks } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
@@ -1304,6 +1306,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
   registerPassRoutes(app, routeCtx);
   registerAdminRoutes(app, routeCtx);
   registerActivityRoutes(app, routeCtx);
+  registerDashboardRoutes(app, routeCtx);
   registerStructureRoutes(app, routeCtx);
   registerUserRoutes(app, routeCtx);
   registerPlatformRoutes(app, routeCtx);
@@ -1346,14 +1349,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
   // --- Expiration & Archival Logic ---
   // Pass lifecycle is evaluated against the business calendar date (default Qatar time),
   // not the server's UTC clock: a pass valid "to 12 Nov" is valid for the whole of 12 Nov local time.
-  const BUSINESS_TZ = process.env.APP_TIMEZONE || 'Asia/Qatar';
-  const businessToday = (): string => {
-    try {
-      return new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-    } catch {
-      return new Date().toISOString().substring(0, 10);
-    }
-  };
+  // (businessToday: src/server/businessDate.ts)
 
   // Statuses after which a pass no longer grants access. These records are kept forever as history.
   const TERMINAL_PASS_STATUSES = ['expired', 'revoked', 'cancelled', 'replaced', 'superseded', 'inactive', 'rejected', 'deleted'];

@@ -1,17 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { Users, ShieldCheck, Clock, FileText, Printer } from 'lucide-react';
 import { StatCard } from '../components/common/StatCard';
-import { cn, formatDate } from '../lib/utils';
-import { Employee, Pass, PassApplication, Location, Category, BrandingSettings, UserProfile } from '../types';
-import { resolvePersonnelStatus, getApplicationBadgeProps, isHistoryStatus } from '../utils/passStatus';
+import { cn, formatDate, apiFetch } from '../lib/utils';
+import { onDataChanged } from '../lib/realtime';
+import { Location, Category, BrandingSettings, UserProfile } from '../types';
+import { getApplicationBadgeProps } from '../utils/passStatus';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 
 interface DashboardProps {
-  employees: Employee[];
-  passes: Pass[];
-  applications: PassApplication[];
   locations: Location[];
   categories: Category[];
   company: BrandingSettings | null;
@@ -19,11 +17,45 @@ interface DashboardProps {
   allUsers?: UserProfile[];
 }
 
-export function Dashboard({ 
-  employees, 
-  passes, 
-  applications,
-  locations, 
+interface DashboardApp {
+  id: string;
+  authorityAppNumber: string | null;
+  locationId: string | null;
+  status: string;
+  type: string;
+  requesterId: string | null;
+  createdAt: string | null;
+  locationName: string | null;
+  requesterName: string | null;
+  employeeCount: number;
+}
+
+interface DashboardSummary {
+  employeeCount: number;
+  totalPassCount: number;
+  activePassCount: number;
+  activeApplicationCount: number;
+  activeApplications: DashboardApp[];
+  recentApplications: DashboardApp[];
+  expiring48hCount: number;
+  expiring48h: { id: string; employeeId: string; passNumber: string | null; expiryDate: string; employeeName: string | null; locationName: string | null }[];
+  expiringSoonCount: number;
+  expiringByLocation: [string, number][];
+  expiringByCategory: [string, number][];
+  activeByLocation: Record<string, number>;
+}
+
+const EMPTY: DashboardSummary = {
+  employeeCount: 0, totalPassCount: 0, activePassCount: 0, activeApplicationCount: 0,
+  activeApplications: [], recentApplications: [], expiring48hCount: 0, expiring48h: [],
+  expiringSoonCount: 0, expiringByLocation: [], expiringByCategory: [], activeByLocation: {},
+};
+
+// Lists whose changes alter the dashboard
+const DASHBOARD_RESOURCES = ['employees', 'passes', 'passApplications', 'locations', 'categories'];
+
+export function Dashboard({
+  locations,
   categories,
   company,
   globalSearch,
@@ -31,85 +63,36 @@ export function Dashboard({
 }: DashboardProps) {
   const navigate = useNavigate();
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
-  const isActivePassStatus = (status: string) => ['active', 'collected', 'completed', 'approved'].includes(status);
-  const activePasses = passes.filter(p => isActivePassStatus(p.status));
-  // In progress = not completed and not closed. Closed includes the statuses the daily lifecycle
-  // job sets when passes end (expired, replaced), not only the ones people set by hand.
-  const activeApplications = useMemo(() => {
-    return applications.filter(a => (a.status || '').toLowerCase() !== 'completed' && !isHistoryStatus(a.status));
-  }, [applications]);
-  const expiring48h = passes.filter(p => {
-    if (!isActivePassStatus(p.status) || !p.expiryDate) return false;
-    const expiry = new Date(p.expiryDate);
-    const today = new Date();
-    const diffHours = (expiry.getTime() - today.getTime()) / (1000 * 60 * 60);
-    return diffHours > 0 && diffHours <= 48;
-  });
 
-  const expiringSoon = passes.filter(p => {
-    if (!isActivePassStatus(p.status) || !p.expiryDate) return false;
-    const expiry = new Date(p.expiryDate);
-    const today = new Date();
-    const diffDays = Math.ceil((expiry.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-    return diffDays > 0 && diffDays <= 30;
-  });
+  // Counts, short lists and per-location totals are worked out by the server (/api/dashboard),
+  // so this page needs none of the full lists.
+  const [summary, setSummary] = useState<DashboardSummary>(EMPTY);
+  const seq = useRef(0);
+  const searchRef = useRef(globalSearch);
+  searchRef.current = globalSearch;
+  const load = useCallback(async () => {
+    const mySeq = ++seq.current;
+    try {
+      const q = searchRef.current.trim();
+      const res = await apiFetch(`/api/dashboard${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (mySeq === seq.current) setSummary({ ...EMPTY, ...data });
+    } catch { /* keep the last summary */ }
+  }, []);
+  useEffect(() => {
+    const t = setTimeout(load, globalSearch ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [globalSearch, load]);
+  useEffect(() => onDataChanged(resources => {
+    if (resources.some(r => DASHBOARD_RESOURCES.includes(r))) load();
+  }), [load]);
 
-  const expiringSoonByLocation = useMemo(() => {
-    const report: Record<string, number> = {};
-    expiringSoon.forEach(p => {
-      const loc = locations.find(l => l.id === p.locationId);
-      const name = loc?.name || 'Unknown';
-      report[name] = (report[name] || 0) + 1;
-    });
-    return Object.entries(report).sort((a, b) => b[1] - a[1]);
-  }, [expiringSoon, locations]);
-
-  const expiringSoonByCategory = useMemo(() => {
-    const report: Record<string, number> = {};
-    expiringSoon.forEach(p => {
-      const loc = locations.find(l => l.id === p.locationId);
-      const cat = categories.find(c => c.id === loc?.categoryId);
-      const name = cat?.name || 'Uncategorized';
-      report[name] = (report[name] || 0) + 1;
-    });
-    return Object.entries(report).sort((a, b) => b[1] - a[1]);
-  }, [expiringSoon, locations, categories]);
-
-  const filteredPasses = useMemo(() => {
-    if (!globalSearch) return passes;
-    const s = globalSearch.toLowerCase();
-    return passes.filter(p => {
-      const emp = employees.find(e => e.id === p.employeeId);
-      const loc = locations.find(l => l.id === p.locationId);
-      return (
-        emp?.name?.toLowerCase().includes(s) ||
-        loc?.name?.toLowerCase().includes(s) ||
-        p.id?.toLowerCase().includes(s)
-      );
-    });
-  }, [passes, employees, locations, globalSearch]);
-
-  const recentApplications = useMemo(() => {
-    let list = applications;
-    if (globalSearch) {
-      const s = globalSearch.toLowerCase();
-      list = applications.filter(a => {
-        const loc = locations.find(l => l.id === a.locationId);
-        return (
-          a.id.toLowerCase().includes(s) ||
-          a.authorityAppNumber?.toLowerCase().includes(s) ||
-          loc?.name.toLowerCase().includes(s)
-        );
-      });
-    }
-    // Newest submissions first ("By <requester>" is who submitted). Sorting by last update let
-    // automatic expiry closures (made by the system, not a person) push real activity off the list.
-    return [...list].sort((a, b) => {
-      const timeA = new Date(a.createdAt || a.updatedAt || 0).getTime();
-      const timeB = new Date(b.createdAt || b.updatedAt || 0).getTime();
-      return timeB - timeA;
-    });
-  }, [applications, locations, globalSearch]);
+  const requesterOf = (app: DashboardApp) => {
+    const mappedUser = allUsers.find(u => u.id === app.requesterId || u.email === app.requesterId);
+    return mappedUser?.displayName || mappedUser?.email || app.requesterName || app.requesterId || 'User';
+  };
+  const activeAtLocation = (locId: string) => summary.activeByLocation[locId] || 0;
 
   return (
     <motion.div 
@@ -140,35 +123,35 @@ export function Dashboard({
         <StatCard 
           icon={<Users className="text-blue-600" />} 
           label="Total Employees" 
-          value={employees.length} 
+          value={summary.employeeCount} 
           color="bg-blue-50"
           onClick={() => navigate('/employees')}
         />
         <StatCard 
           icon={<ShieldCheck className="text-emerald-600" />} 
           label="Active Passes" 
-          value={activePasses.length} 
+          value={summary.activePassCount} 
           color="bg-emerald-50"
           onClick={() => navigate('/status-management')}
         />
         <StatCard 
           icon={<Clock className="text-amber-600" />} 
           label="Active Applications" 
-          value={activeApplications.length} 
+          value={summary.activeApplicationCount} 
           color="bg-amber-50"
           onClick={() => navigate('/applications')}
         />
         <StatCard 
           icon={<Clock className="text-[#800020]" />} 
           label="Expiring (48h)" 
-          value={expiring48h.length} 
+          value={summary.expiring48hCount} 
           color="bg-rose-100/50"
           onClick={() => navigate('/status-management')}
         />
         <StatCard 
           icon={<Clock className="text-rose-600" />} 
           label="Expiring Soon" 
-          value={expiringSoon.length} 
+          value={summary.expiringSoonCount} 
           color="bg-rose-50"
           onClick={() => navigate('/status-management')}
         />
@@ -181,9 +164,7 @@ export function Dashboard({
             Expirations (Next 48h)
           </h3>
           <div className="space-y-1.5 max-h-[260px] overflow-y-auto pr-1 custom-scrollbar">
-            {expiring48h.map(pass => {
-              const emp = employees.find(e => e.id === pass.employeeId);
-              const loc = locations.find(l => l.id === pass.locationId);
+            {summary.expiring48h.map(pass => {
               return (
                 <div 
                   key={pass.id} 
@@ -195,8 +176,8 @@ export function Dashboard({
                       !
                     </div>
                     <div>
-                      <p className="font-bold text-xs text-slate-900 leading-tight">{emp?.name}</p>
-                      <p className="text-[10px] text-slate-500 font-medium">{loc?.name} • {pass.passNumber || '—'}</p>
+                      <p className="font-bold text-xs text-slate-900 leading-tight">{pass.employeeName}</p>
+                      <p className="text-[10px] text-slate-500 font-medium">{pass.locationName} • {pass.passNumber || '—'}</p>
                     </div>
                   </div>
                   <div className="text-right">
@@ -205,7 +186,7 @@ export function Dashboard({
                 </div>
               );
             })}
-            {expiring48h.length === 0 && (
+            {summary.expiring48h.length === 0 && (
               <p className="text-center py-6 text-slate-400 text-xs">No personnel expiring in the next 48 hours.</p>
             )}
           </div>
@@ -217,10 +198,8 @@ export function Dashboard({
             Active Applications
           </h3>
           <div className="space-y-1.5 max-h-[260px] overflow-y-auto pr-1 custom-scrollbar">
-            {activeApplications.map(req => {
-              const loc = locations.find(l => l.id === req.locationId);
-              const mappedUser = allUsers.find(u => u.id === req.requesterId || u.email === req.requesterId);
-              const requester = mappedUser?.displayName || mappedUser?.email || employees.find(e => e.id === req.requesterId)?.name || req.requesterId || 'User';
+            {summary.activeApplications.map(req => {
+              const requester = requesterOf(req);
               const badge = getApplicationBadgeProps(req.status);
               return (
                 <div 
@@ -237,7 +216,7 @@ export function Dashboard({
                         #{req.id.toUpperCase()}
                         {req.authorityAppNumber ? ` (${req.authorityAppNumber})` : ''}
                       </p>
-                      <p className="text-[10px] text-slate-500 font-medium">{loc?.name || '—'} • {req.employeeIds?.length || 0} Members</p>
+                      <p className="text-[10px] text-slate-500 font-medium">{req.locationName || '—'} • {req.employeeCount} Members</p>
                     </div>
                   </div>
                   <div className="text-right flex flex-col items-end">
@@ -249,7 +228,7 @@ export function Dashboard({
                 </div>
               );
             })}
-            {activeApplications.length === 0 && (
+            {summary.activeApplications.length === 0 && (
               <p className="text-center py-6 text-slate-400 text-xs">No active applications found.</p>
             )}
           </div>
@@ -259,10 +238,8 @@ export function Dashboard({
       <div className="bg-white rounded-lg border border-slate-200/90 p-3 shadow-2xs">
         <h3 className="font-bold text-xs mb-2.5 text-slate-900 uppercase tracking-wider">Recent Activity</h3>
         <div className="space-y-1.5">
-          {recentApplications.slice(0, 5).map((app) => {
-            const loc = locations.find(l => l.id === app.locationId);
-            const mappedUser = allUsers.find(u => u.id === app.requesterId || u.email === app.requesterId);
-            const requester = mappedUser?.displayName || mappedUser?.email || employees.find(e => e.id === app.requesterId)?.name || app.requesterId || 'User';
+          {summary.recentApplications.map((app) => {
+            const requester = requesterOf(app);
             const badge = getApplicationBadgeProps(app.status);
             return (
               <div 
@@ -280,7 +257,7 @@ export function Dashboard({
                       {app.authorityAppNumber ? ` (${app.authorityAppNumber})` : ''}
                     </p>
                     <p className="text-[10px] text-slate-500 font-medium">
-                      {loc?.name || '—'} • {app.employeeIds?.length || 0} Personnel • {app.type === 'main' ? 'Main Pass' : 'Supplementary Pass'}
+                      {app.locationName || '—'} • {app.employeeCount} Personnel • {app.type === 'main' ? 'Main Pass' : 'Supplementary Pass'}
                     </p>
                   </div>
                 </div>
@@ -293,7 +270,7 @@ export function Dashboard({
               </div>
             );
           })}
-          {recentApplications.length === 0 && (
+          {summary.recentApplications.length === 0 && (
             <div className="text-center py-6 text-slate-400">
               <FileText className="mx-auto mb-1 opacity-20" size={24} />
               <p className="text-xs">No recent application activity found.</p>
@@ -309,7 +286,7 @@ export function Dashboard({
             Expiry by Location
           </h3>
           <div className="space-y-1.5">
-            {expiringSoonByLocation.map(([name, count]) => (
+            {summary.expiringByLocation.map(([name, count]) => (
               <div key={name} className="flex items-center justify-between p-2 rounded-md bg-slate-50/80 border border-slate-200/70">
                 <span className="text-xs font-semibold text-slate-700">{name}</span>
                 <span className="px-2 py-0.5 bg-rose-50 text-rose-600 rounded text-[9px] font-bold">
@@ -317,7 +294,7 @@ export function Dashboard({
                 </span>
               </div>
             ))}
-            {expiringSoonByLocation.length === 0 && (
+            {summary.expiringByLocation.length === 0 && (
               <p className="text-center py-3 text-slate-400 text-xs">No passes expiring soon.</p>
             )}
           </div>
@@ -329,7 +306,7 @@ export function Dashboard({
             Expiry by Category
           </h3>
           <div className="space-y-1.5">
-            {expiringSoonByCategory.map(([name, count]) => (
+            {summary.expiringByCategory.map(([name, count]) => (
               <div key={name} className="flex items-center justify-between p-2 rounded-md bg-slate-50/80 border border-slate-200/70">
                 <span className="text-xs font-semibold text-slate-700">{name}</span>
                 <span className="px-2 py-0.5 bg-rose-50 text-rose-600 rounded text-[9px] font-bold">
@@ -337,7 +314,7 @@ export function Dashboard({
                 </span>
               </div>
             ))}
-            {expiringSoonByCategory.length === 0 && (
+            {summary.expiringByCategory.length === 0 && (
               <p className="text-center py-3 text-slate-400 text-xs">No passes expiring soon.</p>
             )}
           </div>
@@ -348,8 +325,8 @@ export function Dashboard({
         <h3 className="font-bold text-xs mb-3 text-slate-900 uppercase tracking-wider">Location Distribution</h3>
         <div className="space-y-3">
           {locations.map(loc => {
-            const count = passes.filter(p => p.locationId === loc.id && isActivePassStatus(p.status)).length;
-            const percentage = passes.length > 0 ? (count / passes.length) * 100 : 0;
+            const count = activeAtLocation(loc.id);
+            const percentage = summary.totalPassCount > 0 ? (count / summary.totalPassCount) * 100 : 0;
             return (
               <div key={loc.id} className="space-y-1">
                 <div className="flex justify-between text-[11px]">
@@ -390,19 +367,19 @@ export function Dashboard({
           <div className="grid grid-cols-4 gap-2 text-center">
             <div className="p-3 bg-[#F9FAFB] rounded-xl border border-[#E5E7EB]">
               <p className="text-[8px] font-bold text-[#9CA3AF] uppercase">Registered Personnel</p>
-              <p className="text-lg font-black text-[#1A1A1A] mt-0.5">{employees.length}</p>
+              <p className="text-lg font-black text-[#1A1A1A] mt-0.5">{summary.employeeCount}</p>
             </div>
             <div className="p-3 bg-emerald-50/50 rounded-xl border border-emerald-200">
               <p className="text-[8px] font-bold text-emerald-800 uppercase">Active Passes</p>
-              <p className="text-lg font-black text-emerald-900 mt-0.5">{activePasses.length}</p>
+              <p className="text-lg font-black text-emerald-900 mt-0.5">{summary.activePassCount}</p>
             </div>
             <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200">
               <p className="text-[8px] font-bold text-amber-800 uppercase">Active Requests</p>
-              <p className="text-lg font-black text-amber-900 mt-0.5">{activeApplications.length}</p>
+              <p className="text-lg font-black text-amber-900 mt-0.5">{summary.activeApplicationCount}</p>
             </div>
             <div className="p-3 bg-rose-50/50 rounded-xl border border-rose-200">
               <p className="text-[8px] font-bold text-rose-800 uppercase">Expiring (48h)</p>
-              <p className="text-lg font-black text-rose-900 mt-0.5">{expiring48h.length}</p>
+              <p className="text-lg font-black text-rose-900 mt-0.5">{summary.expiring48hCount}</p>
             </div>
           </div>
 
@@ -410,7 +387,7 @@ export function Dashboard({
             <h3 className="text-xs font-black text-[#1A1A1A] uppercase tracking-wider mb-2">Location Security Breakdown</h3>
             <div className="grid grid-cols-2 gap-2 text-[10px]">
               {locations.map(loc => {
-                const count = passes.filter(p => p.locationId === loc.id && isActivePassStatus(p.status)).length;
+                const count = activeAtLocation(loc.id);
                 return (
                   <div key={loc.id} className="p-2 bg-gray-50 rounded-lg border border-gray-200 flex justify-between items-center">
                     <span className="font-bold text-[#374151]">{loc.name}</span>

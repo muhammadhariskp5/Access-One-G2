@@ -65,6 +65,91 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
     }
   });
 
+  // Which of these identifiers already belong to a (live) employee — for the add/edit/import
+  // forms' "already registered" hints, without the browser holding the whole employee list.
+  // Body: { values: string[], excludeId? }. Returns the values found, per kind.
+  app.post("/api/employees/lookup-ids", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
+    let connection;
+    try {
+      const values = Array.from(new Set(
+        (Array.isArray(req.body?.values) ? req.body.values : [])
+          .map((v: unknown) => (typeof v === 'string' ? v.trim() : ''))
+          .filter((v: string) => v && v.length <= 255)
+      )).slice(0, 5000) as string[];
+      const excludeId = typeof req.body?.excludeId === 'string' ? req.body.excludeId : null;
+      const out = { employeeId: [] as string[], document: [] as string[], passport: [] as string[] };
+      if (values.length === 0) return res.json(out);
+      connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
+      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+      const found = { employeeId: new Set<string>(), document: new Set<string>(), passport: new Set<string>() };
+      const lower = new Map(values.map(v => [v.toLowerCase(), v]));
+      for (let i = 0; i < values.length; i += 300) {
+        const chunk = values.slice(i, i + 300);
+        const binds: Record<string, unknown> = {};
+        const lb: string[] = [];
+        const eb: string[] = [];
+        chunk.forEach((v, j) => { binds[`l${j}`] = v.toLowerCase(); binds[`e${j}`] = v; lb.push(`:l${j}`); eb.push(`:e${j}`); });
+        let scope = ' AND deletedAt IS NULL';
+        if (orgId) { scope += ' AND organizationId = :orgId'; binds.orgId = orgId; }
+        if (excludeId) { scope += ' AND id <> :excludeId'; binds.excludeId = excludeId; }
+        const res2 = await connection.execute(
+          `SELECT id, employeeId, qidVisaNumber, qatarId, visaNumber, passportNumber FROM employees
+            WHERE (LOWER(employeeId) IN (${lb.join(', ')}) OR id IN (${eb.join(', ')}) OR qidVisaNumber IN (${eb.join(', ')})
+               OR qatarId IN (${eb.join(', ')}) OR visaNumber IN (${eb.join(', ')}) OR passportNumber IN (${eb.join(', ')}))${scope}`,
+          binds, opts
+        );
+        const inChunk = new Set(chunk);
+        for (const r of (res2.rows || []) as any[]) {
+          const g = (k: string) => r[k.toUpperCase()] ?? r[k];
+          const code = g('employeeId');
+          if (code && lower.has(String(code).toLowerCase())) found.employeeId.add(lower.get(String(code).toLowerCase())!);
+          if (inChunk.has(String(g('id')))) found.employeeId.add(String(g('id')));
+          for (const k of ['qidVisaNumber', 'qatarId', 'visaNumber']) if (g(k) && inChunk.has(String(g(k)))) found.document.add(String(g(k)));
+          if (g('passportNumber') && inChunk.has(String(g('passportNumber')))) found.passport.add(String(g('passportNumber')));
+        }
+      }
+      res.json({ employeeId: [...found.employeeId], document: [...found.document], passport: [...found.passport] });
+    } catch (err) {
+      logger.error('Unhandled error', { err: err });
+      res.status(500).json({ error: "Failed to check identifiers" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  // Open passes and applications of one employee (shown in the delete confirmation).
+  app.get("/api/employees/:id/usage", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
+    let connection;
+    try {
+      connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
+      const binds: Record<string, unknown> = { id: req.params.id };
+      const orgP = orgId ? ' AND p.organizationId = :orgId' : '';
+      const orgR = orgId ? ' AND r.organizationId = :orgId' : '';
+      if (orgId) binds.orgId = orgId;
+      const r = await connection.execute(
+        `SELECT (SELECT COUNT(*) FROM passes p WHERE p.employeeId = :id AND p.deletedAt IS NULL
+                   AND LOWER(p.status) IN ('active', 'approved', 'collected', 'processing')${orgP}) AS activePasses,
+                (SELECT COUNT(*) FROM passRequestEmployees pre JOIN passRequests r ON r.id = pre.requestId
+                  WHERE pre.employeeId = :id AND r.deletedAt IS NULL
+                    AND LOWER(r.status) IN ('pending', 'approved', 'accepted', 'processing')${orgR}) AS activeApplications
+           FROM employees WHERE id = :id`,
+        binds, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const row: any = r.rows?.[0] || {};
+      res.json({
+        activePasses: Number(row.ACTIVEPASSES ?? row.activePasses ?? 0),
+        activeApplications: Number(row.ACTIVEAPPLICATIONS ?? row.activeApplications ?? 0),
+      });
+    } catch (err) {
+      logger.error('Unhandled error', { err: err });
+      res.status(500).json({ error: "Failed to check employee usage" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
   app.get("/api/employees/:id", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {

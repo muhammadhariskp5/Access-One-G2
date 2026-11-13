@@ -2045,7 +2045,6 @@ export function PassSubmissionForm({
         >
           <EmployeeForm
             employee={creatingEmployeeRow.prefilled as Employee}
-            employees={employees}
             divisions={divisions}
             departments={departments}
             projects={projects}

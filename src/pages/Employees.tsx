@@ -12,9 +12,6 @@ import { EmployeeImportForm } from '../components/employees/EmployeeImportForm';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 
 interface EmployeesProps {
-  employees: Employee[];
-  passes?: Pass[];
-  applications?: PassApplication[];
   divisions: Division[];
   departments: Department[];
   projects: Project[];
@@ -26,9 +23,6 @@ interface EmployeesProps {
 }
 
 export function Employees({ 
-  employees, 
-  passes = [],
-  applications = [],
   divisions,
   departments,
   projects,
@@ -120,15 +114,19 @@ export function Employees({
     }
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     const emp = visibleEmployees.find(e => e.id === id);
     const empName = emp?.name || 'this employee';
-    const activeEmpPasses = passes.filter(p => p.employeeId === id && ['active', 'approved', 'collected', 'processing'].includes(p.status));
-    const activeEmpApps = applications.filter(a => a.employeeIds?.includes(id) && ['pending', 'approved', 'accepted', 'processing'].includes(a.status));
+    // Open passes / applications, counted by the server
+    let usage = { activePasses: 0, activeApplications: 0 };
+    try {
+      const res = await apiFetch(`/api/employees/${encodeURIComponent(id)}/usage`);
+      if (res.ok) usage = await res.json();
+    } catch { /* the confirmation still shows */ }
 
     let warningMsg = `Are you sure you want to delete ${empName}? This action cannot be undone.`;
-    if (activeEmpPasses.length > 0 || activeEmpApps.length > 0) {
-      warningMsg += ` Note: This employee currently has ${activeEmpPasses.length} active pass(es) and ${activeEmpApps.length} active application(s). Deleting will automatically cancel and archive these passes.`;
+    if (usage.activePasses > 0 || usage.activeApplications > 0) {
+      warningMsg += ` Note: This employee currently has ${usage.activePasses} active pass(es) and ${usage.activeApplications} active application(s). Deleting will automatically cancel and archive these passes.`;
     }
 
     showConfirm(
@@ -920,7 +918,6 @@ export function Employees({
         title="Batch Import Personnel"
       >
         <EmployeeImportForm 
-          employees={employees}
           divisions={divisions}
           departments={departments}
           projects={projects}
@@ -935,7 +932,6 @@ export function Employees({
         title="Add New Personnel"
       >
         <EmployeeForm 
-          employees={employees}
           divisions={divisions}
           departments={departments}
           projects={projects}
@@ -952,8 +948,7 @@ export function Employees({
         {editingEmployee && (
           <EmployeeForm 
             employee={editingEmployee}
-            employees={employees}
-            divisions={divisions}
+              divisions={divisions}
             departments={departments}
             projects={projects}
             onClose={() => setEditingEmployee(null)}

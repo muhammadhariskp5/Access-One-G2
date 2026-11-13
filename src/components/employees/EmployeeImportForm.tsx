@@ -3,10 +3,10 @@ import { FileText, Upload, CheckCircle2, AlertCircle, ChevronRight, ChevronLeft,
 import * as XLSX from 'xlsx';
 import { BulkImportReview } from '../common/BulkImportReview';
 import { apiFetch, cn } from '../../lib/utils';
+import { lookupEmployeeIds, IdLookup } from '../../lib/employeeLookup';
 import { Division, Department, Employee, Project } from '../../types';
 
 interface EmployeeImportFormProps {
-  employees: Employee[];
   divisions: Division[];
   departments: Department[];
   projects: Project[];
@@ -35,7 +35,7 @@ const SYSTEM_FIELDS = [
   { id: 'safetyInductionDate', label: 'Safety Induction Date', required: false }
 ];
 
-export function EmployeeImportForm({ employees, divisions, departments, projects, onSuccess, onClose }: EmployeeImportFormProps) {
+export function EmployeeImportForm({ divisions, departments, projects, onSuccess, onClose }: EmployeeImportFormProps) {
   const [step, setStep] = useState<ImportStep>('upload');
   const [isImporting, setIsImporting] = useState(false);
   const [rawHeaders, setRawHeaders] = useState<string[]>([]);
@@ -95,8 +95,27 @@ export function EmployeeImportForm({ employees, divisions, departments, projects
     setStep('defaults');
   };
 
-  const proceedToReview = () => {
-    const processed = rawData.map((row, index) => {
+  // A row is a duplicate when its code, QID/visa or passport already belongs to an employee
+  // (checked by the server in one batch).
+  const rowKeys = (item: any) => ({
+    codes: [item.employeeId].filter(Boolean).map(String),
+    docs: [item.qidVisaNumber, item.qatarId, item.visaNumber].filter(Boolean).map(String),
+    passports: [item.passportNumber].filter(Boolean).map(String),
+  });
+  const isDuplicateRow = (item: any, found: IdLookup) => {
+    const k = rowKeys(item);
+    const codes = new Set(found.employeeId.map(v => v.toLowerCase()));
+    return k.codes.some(v => codes.has(v.toLowerCase())) ||
+      k.docs.some(v => found.document.includes(v)) ||
+      k.passports.some(v => found.passport.includes(v));
+  };
+  const lookupRows = (items: any[]) => lookupEmployeeIds(items.flatMap(i => {
+    const k = rowKeys(i);
+    return [...k.codes, ...k.docs, ...k.passports];
+  }));
+
+  const proceedToReview = async () => {
+    const mapped = rawData.map((row, index) => {
       const item: any = { 
         id: `temp-${index}`,
         ...defaults 
@@ -109,18 +128,12 @@ export function EmployeeImportForm({ employees, divisions, departments, projects
       });
       item.name = `${item.firstName || ''} ${item.lastName || ''}`.trim();
       
-      // Duplicate detection
-      const isDuplicate = employees.some(emp => 
-        (item.employeeId && emp.employeeId === item.employeeId) ||
-        (item.qidVisaNumber && (emp.qidVisaNumber === item.qidVisaNumber || emp.qatarId === item.qidVisaNumber || emp.visaNumber === item.qidVisaNumber)) ||
-        (item.qatarId && (emp.qidVisaNumber === item.qatarId || emp.qatarId === item.qatarId)) ||
-        (item.visaNumber && (emp.qidVisaNumber === item.visaNumber || emp.visaNumber === item.visaNumber)) ||
-        (item.passportNumber && emp.passportNumber === item.passportNumber)
-      );
-      item.isDuplicate = isDuplicate;
-      item.skip = isDuplicate; // Default to skip duplicates
-
       return item;
+    });
+    const found = await lookupRows(mapped);
+    const processed = mapped.map(item => {
+      const isDuplicate = isDuplicateRow(item, found);
+      return { ...item, isDuplicate, skip: isDuplicate }; // duplicates skipped by default
     });
     setProcessedData(processed);
     setStep('review');
@@ -135,18 +148,18 @@ export function EmployeeImportForm({ employees, divisions, departments, projects
         updated.name = `${updated.firstName || ''} ${updated.lastName || ''}`.trim();
       }
       
-      // Re-check duplicate status after update
-      const isDuplicate = employees.some(emp => 
-        (updated.employeeId && emp.employeeId === updated.employeeId) ||
-        (updated.qidVisaNumber && (emp.qidVisaNumber === updated.qidVisaNumber || emp.qatarId === updated.qidVisaNumber || emp.visaNumber === updated.qidVisaNumber)) ||
-        (updated.qatarId && (emp.qidVisaNumber === updated.qatarId || emp.qatarId === updated.qatarId)) ||
-        (updated.visaNumber && (emp.qidVisaNumber === updated.visaNumber || emp.visaNumber === updated.visaNumber)) ||
-        (updated.passportNumber && emp.passportNumber === updated.passportNumber)
-      );
-      updated.isDuplicate = isDuplicate;
-      
       return updated;
     }));
+    // Re-check this row's duplicate status after the edit
+    if (['employeeId', 'qidVisaNumber', 'qatarId', 'visaNumber', 'passportNumber'].includes(field)) {
+      const row = processedData.find(r => r.id === id);
+      if (!row) return;
+      const updated = { ...row, [field]: value };
+      lookupRows([updated]).then(found => {
+        const isDuplicate = isDuplicateRow(updated, found);
+        setProcessedData(prev => prev.map(r => (r.id === id ? { ...r, isDuplicate } : r)));
+      });
+    }
   };
 
   const toggleSkipRow = (id: string) => {

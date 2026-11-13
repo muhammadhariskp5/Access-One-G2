@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Employee, Division, Department, Project } from '../../types';
 import { apiFetch, cn, parseToYMD } from '../../lib/utils';
+import { lookupEmployeeIds } from '../../lib/employeeLookup';
 
 interface EmployeeFormProps {
   employee?: Partial<Employee>;
-  employees: Employee[];
   divisions: Division[];
   departments: Department[];
   projects: Project[];
@@ -12,7 +12,7 @@ interface EmployeeFormProps {
   onSuccess: (savedEmp?: Employee) => void;
 }
 
-export function EmployeeForm({ employee, employees, divisions, departments, projects, onClose, onSuccess }: EmployeeFormProps) {
+export function EmployeeForm({ employee, divisions, departments, projects, onClose, onSuccess }: EmployeeFormProps) {
   const [data, setData] = useState<Partial<Employee>>(() => {
     if (!employee) return { status: 'active', employeeType: 'Internal' };
     return {
@@ -26,31 +26,32 @@ export function EmployeeForm({ employee, employees, divisions, departments, proj
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // "Already in use" hints come from the server (debounced while typing); it also rejects
+  // duplicates on save.
+  const dupTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const checkDuplicate = (name: 'employeeId' | 'qidVisaNumber', value: string) => {
+    clearTimeout(dupTimers.current[name]);
+    const v = value.trim();
+    const set = (msg: string | null) => setErrors(prev => {
+      const next = { ...prev };
+      if (msg) next[name] = msg; else delete next[name];
+      return next;
+    });
+    if (!v) { set(null); return; }
+    dupTimers.current[name] = setTimeout(async () => {
+      const found = await lookupEmployeeIds([v], employee?.id);
+      if (name === 'employeeId') set(found.employeeId.length > 0 ? `ID "${v}" is already in use.` : null);
+      else set(found.document.length > 0 ? `QID/Visa "${v}" is already registered.` : null);
+    }, 300);
+  };
+
   const validateField = (name: string, value: string) => {
     const newErrors = { ...errors };
+    if (name === 'employeeId' || name === 'qidVisaNumber') {
+      checkDuplicate(name, value);
+      return;
+    }
     const today = new Date().toISOString().split('T')[0];
-
-    if (name === 'employeeId' && value.trim()) {
-      const isDuplicate = employees.some(emp => 
-        (emp.employeeId?.toLowerCase() === value.trim().toLowerCase() || emp.id === value.trim()) && emp.id !== employee?.id
-      );
-      if (isDuplicate) {
-        newErrors.employeeId = `ID "${value}" is already in use.`;
-      } else {
-        delete newErrors.employeeId;
-      }
-    }
-
-    if (name === 'qidVisaNumber' && value.trim()) {
-      const isDuplicate = employees.some(emp => 
-        (emp.qidVisaNumber === value.trim() || emp.qatarId === value.trim() || emp.visaNumber === value.trim()) && emp.id !== employee?.id
-      );
-      if (isDuplicate) {
-        newErrors.qidVisaNumber = `QID/Visa "${value}" is already registered.`;
-      } else {
-        delete newErrors.qidVisaNumber;
-      }
-    }
 
     if (name === 'qidVisaExpiry' && value) {
       if (value < today) {

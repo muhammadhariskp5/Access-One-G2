@@ -393,7 +393,6 @@ export function EmployeeDetail({
       >
         <EmployeeForm 
           employee={employee}
-          employees={employees}
           divisions={divisions}
           departments={departments}
           projects={projects}

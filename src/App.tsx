@@ -45,6 +45,18 @@ const EmployeeDetail = lazy(() => import('./pages/EmployeeDetail').then(m => ({ 
 const ApplicationDetail = lazy(() => import('./pages/ApplicationDetail').then(m => ({ default: m.ApplicationDetail })));
 const SaaSAdminPortal = lazy(() => import('./pages/SaaSAdminPortal').then(m => ({ default: m.SaaSAdminPortal })));
 
+// The big lists the browser may hold. A screen that still reads them from the browser names them
+// here; screens moved to server queries need none, so they (and signing in) download nothing big.
+// Unknown screens get all three, to be safe.
+type BigList = 'employees' | 'passes' | 'passApplications';
+const BIG_LISTS: BigList[] = ['employees', 'passes', 'passApplications'];
+const BIG_LIST_URL: Record<BigList, string> = { employees: '/api/employees', passes: '/api/passes', passApplications: '/api/passApplications' };
+function listsForPath(path: string): BigList[] {
+  if (['/', '/employees', '/resources', '/settings', '/audit', '/notifications'].includes(path)) return [];
+  if (path === '/matrix') return ['employees', 'passes'];
+  return BIG_LISTS;
+}
+
 const ALL_RESOURCES = ['employees', 'passes', 'passApplications', 'locations', 'categories', 'accessCodes', 'company', 'users', 'divisions', 'projects', 'departments'];
 
 // Apply a delta to a list: changed rows replace their old version in place, new rows go first,
@@ -240,6 +252,12 @@ export default function App() {
   const hadDataErrorRef = useRef(false);
   const fetchSeqRef = useRef(0);
   const syncCursorsRef = useRef<Record<string, string | null>>({ employees: null, passes: null, passApplications: null });
+  // Big lists downloaded so far this session (each once, then kept current with deltas)
+  const NONE_LOADED: Record<BigList, boolean> = { employees: false, passes: false, passApplications: false };
+  const [loadedLists, setLoadedLists] = useState<Record<BigList, boolean>>(NONE_LOADED);
+  const loadedListsRef = useRef<Record<BigList, boolean>>({ ...NONE_LOADED });
+  const loadingListsRef = useRef<Set<BigList>>(new Set());
+  const sessionGenRef = useRef(0); // bumped on sign-out: late downloads are then dropped
   const activeAbortControllerRef = useRef<AbortController | null>(null);
 
   const safeFetch = async (url: string, fallback: any, signal?: AbortSignal): Promise<{ value: any; ok: boolean; cursor?: string | null; status?: number }> => {
@@ -267,9 +285,6 @@ export default function App() {
     setIsFetching(true);
     try {
       const results = await Promise.all([
-        safeFetch('/api/employees', [], abortController.signal),
-        safeFetch('/api/passes', [], abortController.signal),
-        safeFetch('/api/passApplications', [], abortController.signal),
         safeFetch('/api/locations', [], abortController.signal),
         safeFetch('/api/categories', [], abortController.signal),
         safeFetch('/api/accessCodes', [], abortController.signal),
@@ -279,21 +294,12 @@ export default function App() {
         safeFetch('/api/projects', [], abortController.signal),
         safeFetch('/api/departments', [], abortController.signal)
       ]);
-      const [emps, pss, reqs, locs, cats, grps, comp, usrs, divs, projs, depts] = results.map(r => r.value);
+      const [locs, cats, grps, comp, usrs, divs, projs, depts] = results.map(r => r.value);
       const hadError = results.some(r => !r.ok);
 
       if (mySeq !== fetchSeqRef.current || abortController.signal.aborted) return; // a newer fetch has started or this was aborted
 
-      // Where to resume from on the next (delta) refresh of the big lists
-      syncCursorsRef.current = {
-        employees: results[0].ok ? results[0].cursor || null : null,
-        passes: results[1].ok ? results[1].cursor || null : null,
-        passApplications: results[2].ok ? results[2].cursor || null : null,
-      };
 
-      setEmployees(Array.isArray(emps) ? emps : []);
-      setPasses(Array.isArray(pss) ? pss : []);
-      setApplications(Array.isArray(reqs) ? reqs : []);
       setLocations(Array.isArray(locs) ? locs : []);
       setCategories(Array.isArray(cats) ? cats : []);
       setAccessCodes(Array.isArray(grps) ? grps : []);
@@ -363,7 +369,9 @@ export default function App() {
       projects: ['/api/projects', [], v => setProjects(Array.isArray(v) ? v : [])],
       departments: ['/api/departments', [], v => setDepartments(Array.isArray(v) ? v : [])],
     };
-    await Promise.all(resources.filter(r => endpoints[r]).map(async r => {
+    // A big list nobody has opened yet isn't held, so there is nothing to refresh
+    const held = (r: string) => !deltaSetters[r] || loadedListsRef.current[r as BigList];
+    await Promise.all(resources.filter(r => endpoints[r] && held(r)).map(async r => {
       const [url, fallback, apply] = endpoints[r];
       const cursor = syncCursorsRef.current[r];
       if (deltaSetters[r] && cursor) {
@@ -383,6 +391,41 @@ export default function App() {
       }
     }));
   };
+
+  // First visit to a screen that needs a big list: download it once (with its sync cursor).
+  const listSetters: Record<BigList, (v: any[]) => void> = {
+    employees: v => setEmployees(v),
+    passes: v => setPasses(v),
+    passApplications: v => setApplications(v),
+  };
+  const ensureLists = async (lists: BigList[]) => {
+    if (!user) return;
+    const missing = lists.filter(l => !loadedListsRef.current[l] && !loadingListsRef.current.has(l));
+    if (missing.length === 0) return;
+    const gen = sessionGenRef.current;
+    missing.forEach(l => loadingListsRef.current.add(l));
+    await Promise.all(missing.map(async l => {
+      const r = await safeFetch(BIG_LIST_URL[l], []).catch(() => ({ ok: false, value: [], cursor: null }));
+      loadingListsRef.current.delete(l);
+      if (gen !== sessionGenRef.current) return; // signed out meanwhile
+      if (r.ok) {
+        listSetters[l](Array.isArray(r.value) ? r.value : []);
+        syncCursorsRef.current[l] = (r as any).cursor || null;
+      } else {
+        // Show the screen anyway; the next refresh retries with a full download
+        syncCursorsRef.current[l] = null;
+        showToast('Some data failed to load. Showing the latest available information.', 'error');
+      }
+      loadedListsRef.current[l] = true;
+      setLoadedLists(prev => ({ ...prev, [l]: true }));
+    }));
+  };
+  const neededLists = listsForPath(location.pathname);
+  const listsReady = neededLists.every(l => loadedLists[l]);
+  useEffect(() => {
+    if (user) ensureLists(neededLists);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, location.pathname]);
 
   // Every list, big ones as deltas: after a save, and as the fallback when live updates are down
   const refreshAll = () => fetchResources(ALL_RESOURCES);
@@ -561,6 +604,10 @@ export default function App() {
 
   const clearUserDataState = () => {
     syncCursorsRef.current = { employees: null, passes: null, passApplications: null };
+    sessionGenRef.current++;
+    loadedListsRef.current = { employees: false, passes: false, passApplications: false };
+    loadingListsRef.current.clear();
+    setLoadedLists({ employees: false, passes: false, passApplications: false });
     // Invalidate and cancel any ongoing asynchronous network fetches
     fetchSeqRef.current++;
     if (activeAbortControllerRef.current) {
@@ -834,12 +881,12 @@ export default function App() {
           <AnimatePresence mode="wait">
             <div className="flex-1 flex flex-col w-full min-h-[calc(100vh-96px)]">
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-xs text-[#6B7280]">Loading…</div>}>
+              {!listsReady ? (
+                <div className="flex-1 flex items-center justify-center text-xs text-[#6B7280]">Loading…</div>
+              ) : (
               <Routes>
               <Route path="/" element={
                 <Dashboard 
-                  employees={employees} 
-                  passes={passes} 
-                  applications={applications}
                   locations={locations} 
                   categories={categories}
                   company={company}
@@ -932,9 +979,6 @@ export default function App() {
               } />
               <Route path="/employees" element={
                 <Employees 
-                  employees={employees} 
-                  passes={passes}
-                  applications={applications}
                   divisions={divisions}
                   departments={departments}
                   projects={projects}
@@ -1010,6 +1054,7 @@ export default function App() {
               <Route path="/notifications" element={<NotificationsPage currentUser={user} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+              )}
               </Suspense>
           </div>
         </AnimatePresence>
@@ -1020,7 +1065,6 @@ export default function App() {
       {/* Global Modals */}
       <Modal isOpen={isEmployeeModalOpen} onClose={() => setIsEmployeeModalOpen(false)} title="Add New Employee">
         <EmployeeForm 
-          employees={employees} 
           divisions={divisions}
           departments={departments}
           projects={projects}
