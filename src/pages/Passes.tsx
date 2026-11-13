@@ -28,6 +28,9 @@ export interface PassesProps {
   showToast: (msg: string, type?: 'success' | 'error') => void;
   showConfirm: (title: string, message: string, onConfirm: () => void) => void;
   view?: 'applications' | 'status-management';
+  // The full lists are only needed by the application form: requested when it opens
+  formListsReady?: boolean;
+  onNeedFormLists?: () => void;
 }
 
 export function Passes({
@@ -45,7 +48,9 @@ export function Passes({
   globalSearch,
   showToast,
   showConfirm,
-  view = 'applications'
+  view = 'applications',
+  formListsReady = true,
+  onNeedFormLists = () => {}
 }: PassesProps) {
   const [isNewPassModalOpen, setIsNewPassModalOpen] = useState(false);
   const [passModalData, setPassModalData] = useState<any>(null);
@@ -89,9 +94,6 @@ export function Passes({
         <div className="space-y-6">
           {view === 'applications' ? (
             <PassApplicationsView 
-              passes={passes}
-              applications={applications}
-              employees={employees}
               locations={locations}
               categories={categories}
               accessCodes={accessCodes}
@@ -99,8 +101,8 @@ export function Passes({
               currentUser={currentUser}
               onSuccess={onSuccess}
               globalSearch={globalSearch}
-              onNewPass={(data) => { setPassModalData(data); setIsNewPassModalOpen(true); }}
-              onNewApplication={(data) => { setApplicationModalData(data); setIsNewApplicationModalOpen(true); }}
+              onNewPass={(data) => { onNeedFormLists(); setPassModalData(data); setIsNewPassModalOpen(true); }}
+              onNewApplication={(data) => { onNeedFormLists(); setApplicationModalData(data); setIsNewApplicationModalOpen(true); }}
               showToast={showToast}
               showConfirm={showConfirm}
               logAction={logAction}
@@ -109,9 +111,6 @@ export function Passes({
             />
           ) : (
             <PassStatusManagementView 
-              passes={passes}
-              applications={applications}
-              employees={employees}
               locations={locations}
               categories={categories}
               accessCodes={accessCodes}
@@ -196,6 +195,9 @@ export function Passes({
         title={passModalData?.applicationId ? "Issue Passes from Application" : (passModalData?.isDirect ? "Direct Entry Pass" : "New Pass Application")}
         size="6xl"
       >
+        {!formListsReady ? (
+          <div className="py-16 text-center text-xs text-[#6B7280]">Loading…</div>
+        ) : (
         <PassSubmissionForm 
           employees={employees}
           locations={locations}
@@ -213,6 +215,7 @@ export function Passes({
           logAction={logAction}
           showToast={showToast}
         />
+        )}
       </Modal>
 
       <Modal 
@@ -221,6 +224,9 @@ export function Passes({
         title="New Pass Application"
         size="6xl"
       >
+        {!formListsReady ? (
+          <div className="py-16 text-center text-xs text-[#6B7280]">Loading…</div>
+        ) : (
         <PassSubmissionForm 
           employees={employees}
           locations={locations}
@@ -238,6 +244,7 @@ export function Passes({
           logAction={logAction}
           showToast={showToast}
         />
+        )}
       </Modal>
     </div>
   );

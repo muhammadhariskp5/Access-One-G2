@@ -724,6 +724,57 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
   };
 
   app.get("/api/passApplications/:id/history", authorize(['admin', 'approver', 'applier', 'viewer']), getAppHistoryHandler);
+
+  // The people on one application with their details and latest pass on it (the Applications
+  // screen's expanded card), so the screen doesn't need the full employee and pass lists.
+  app.get("/api/passApplications/:id/roster", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
+    let connection;
+    try {
+      connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
+      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+      const binds: Record<string, unknown> = { id: req.params.id };
+      if (orgId) binds.orgId = orgId;
+      const found = await connection.execute(
+        `SELECT id FROM passRequests WHERE id = :id AND deletedAt IS NULL${orgId ? ' AND organizationId = :orgId' : ''}`,
+        binds, opts
+      );
+      if (!found.rows?.length) return res.status(404).json({ error: "Application not found" });
+      const r = await connection.execute(
+        `SELECT pre.employeeId AS employeeId, e.name AS name, e.employeeId AS employeeCode, e.qatarId AS qatarId,
+                e.jobTitle AS jobTitle, e.department AS department,
+                lp.id AS passId, lp.passNumber AS passNumber, lp.status AS passStatus,
+                lp.startDate AS passStartDate, lp.expiryDate AS passExpiryDate
+           FROM passRequestEmployees pre
+           LEFT JOIN employees e ON e.id = pre.employeeId
+           LEFT JOIN (
+             SELECT p.id, p.requestId, p.employeeId, p.passNumber, p.status, p.startDate, p.expiryDate,
+                    ROW_NUMBER() OVER (PARTITION BY p.employeeId ORDER BY p.createdAt DESC, p.id DESC) AS rn
+               FROM passes p WHERE p.requestId = :id AND p.deletedAt IS NULL
+           ) lp ON lp.employeeId = pre.employeeId AND lp.rn = 1
+          WHERE pre.requestId = :id`,
+        { id: req.params.id }, opts
+      );
+      const g = (row: any, k: string) => row[k.toUpperCase()] ?? row[k] ?? null;
+      res.json(((r.rows || []) as any[]).map(row => ({
+        employeeId: g(row, 'employeeId'),
+        name: g(row, 'name'),
+        employeeCode: g(row, 'employeeCode'),
+        qatarId: g(row, 'qatarId'),
+        jobTitle: g(row, 'jobTitle'),
+        department: g(row, 'department'),
+        pass: g(row, 'passId') ? {
+          id: g(row, 'passId'), passNumber: g(row, 'passNumber'), status: g(row, 'passStatus'),
+          startDate: g(row, 'passStartDate'), expiryDate: g(row, 'passExpiryDate'),
+        } : null,
+      })));
+    } catch (err) {
+      logger.error('Unhandled error', { err: err });
+      res.status(500).json({ error: "Failed to load application roster" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
   app.get("/api/pass-requests/:id/history", authorize(['admin', 'approver', 'applier', 'viewer']), getAppHistoryHandler);
 
   // Bulk / Member status update route

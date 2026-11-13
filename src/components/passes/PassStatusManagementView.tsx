@@ -41,10 +41,10 @@ const parseCodes = (raw: unknown): string[] => {
   return [];
 };
 
+// A live supplementary pass that revoking a main pass would also revoke (from the server)
+interface LinkedSupplementary { id: string; employeeId: string; locationId: string | null; passNumber: string | null; status: string; employeeName: string | null; locationName: string | null }
+
 export interface PassStatusManagementViewProps {
-  passes: Pass[];
-  applications?: PassApplication[];
-  employees: Employee[];
   locations: Location[];
   categories: Category[];
   accessCodes: AccessCode[];
@@ -58,10 +58,7 @@ export interface PassStatusManagementViewProps {
 }
 
 export function PassStatusManagementView({ 
-  passes, 
-  applications = [], 
-  employees, 
-  locations, 
+  locations,  
   categories, 
   accessCodes, 
   currentUser, 
@@ -95,7 +92,7 @@ export function PassStatusManagementView({
   const [revokeSupplementaryModal, setRevokeSupplementaryModal] = useState<{
     isOpen: boolean;
     targetPassIds: string[];
-    supplementaryPasses: Pass[];
+    supplementaryPasses: LinkedSupplementary[];
     onConfirm: (reason: string) => Promise<void>;
   } | null>(null);
   const [stageSkipConfirmModal, setStageSkipConfirmModal] = useState<{
@@ -165,7 +162,6 @@ export function PassStatusManagementView({
   };
 
   const employeeFor = (p: ListedPass): Employee | undefined =>
-    employees.find(e => e.id === p.employeeId) ||
     (p.employeeName ? ({ id: p.employeeId, name: p.employeeName, employeeId: p.employeeCode || '', jobTitle: p.employeeJobTitle || '', qatarId: p.employeeQid || '' } as unknown as Employee) : undefined);
   const locationFor = (p: ListedPass): Location | undefined =>
     locations.find(l => l.id === p.locationId) ||
@@ -244,16 +240,11 @@ export function PassStatusManagementView({
 
     // Supplementary Pass Revocation Confirmation Logic
     if (status === 'revoked') {
-      const linkedSupplementary = passes.filter(p => {
-        if (p.type !== 'supplementary') return false;
-        if (['revoked', 'cancelled', 'rejected', 'expired'].includes(p.status)) return false;
-        return ids.some(id => {
-          const targetPass = passList.find(tp => tp.id === id);
-          if (!targetPass) return false;
-          return (p.parentPassId && p.parentPassId === targetPass.id) || 
-                 (targetPass.type === 'main' && (p.employeeId === targetPass.employeeId || p.parentPassId === (targetPass as any).id));
-        });
-      });
+      let linkedSupplementary: LinkedSupplementary[] = [];
+      try {
+        const res = await apiFetch('/api/passes/linked-supplementary', { method: 'POST', body: JSON.stringify({ ids }) });
+        if (res.ok) linkedSupplementary = (await res.json() as LinkedSupplementary[]).filter(sp => !ids.includes(sp.id));
+      } catch { /* the server still cascades the revocation */ }
 
       if (linkedSupplementary.length > 0) {
         setRevokeSupplementaryModal({
@@ -751,8 +742,8 @@ export function PassStatusManagementView({
               </p>
               <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
                 {revokeSupplementaryModal.supplementaryPasses.map(sp => {
-                  const spEmp = employees.find(e => e.id === sp.employeeId);
-                  const spLoc = locations.find(l => l.id === sp.locationId);
+                  const spEmp = { name: sp.employeeName };
+                  const spLoc = { name: sp.locationName };
                   return (
                     <div key={sp.id} className="bg-white p-2 rounded-lg border border-rose-200 text-[11px] flex items-center justify-between">
                       <div>

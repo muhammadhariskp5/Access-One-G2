@@ -8,15 +8,13 @@ import {
 } from 'lucide-react';
 import { Employee, Pass, PassApplication, Location, AccessCode, UserProfile, Division, Department, Project } from '../types';
 import { apiFetch, cn, formatDate } from '../lib/utils';
+import { onDataChanged } from '../lib/realtime';
 import { resolvePersonnelStatus, getApplicationBadgeProps, isHistoryStatus } from '../utils/passStatus';
 import { Modal } from '../components/common/Modal';
 import { EmployeeForm } from '../components/employees/EmployeeForm';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 
 interface EmployeeDetailProps {
-  employees: Employee[];
-  applications: PassApplication[];
-  passes: Pass[];
   locations: Location[];
   accessCodes: AccessCode[];
   divisions: Division[];
@@ -29,9 +27,6 @@ interface EmployeeDetailProps {
 }
 
 export function EmployeeDetail({ 
-  employees,
-  applications,
-  passes,
   locations, 
   accessCodes, 
   divisions,
@@ -46,42 +41,48 @@ export function EmployeeDetail({
   const navigate = useNavigate();
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isPrintBadgeOpen, setIsPrintBadgeOpen] = useState(false);
-  const [detailedData, setDetailedData] = useState<{ applications: PassApplication[], passes: Pass[] } | null>(null);
+  // The person, their passes and their applications come from the server (one request), and are
+  // reloaded when any of them changes (live updates), so this page needs none of the full lists.
+  const [detailedData, setDetailedData] = useState<{ employee: Employee | null; applications: PassApplication[]; passes: Pass[] } | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState(true);
+  const loadSeq = React.useRef(0);
 
-  const employee = useMemo(() => employees.find(e => e.id === id), [employees, id]);
+  const fetchDetails = React.useCallback(async () => {
+    if (!id) return;
+    const mySeq = ++loadSeq.current;
+    try {
+      const res = await apiFetch(`/api/employees/${encodeURIComponent(id)}`);
+      if (mySeq !== loadSeq.current) return;
+      if (res.status === 404) {
+        setDetailedData({ employee: null, applications: [], passes: [] });
+        return;
+      }
+      if (!res.ok) return; // keep what is shown
+      const { requests, passes: empPasses, ...emp } = await res.json();
+      if (mySeq !== loadSeq.current) return;
+      setDetailedData({ employee: emp as Employee, applications: requests || [], passes: empPasses || [] });
+    } catch (err) {
+      console.error("Failed to fetch employee details:", err);
+    } finally {
+      if (mySeq === loadSeq.current) setIsLoadingDetails(false);
+    }
+  }, [id]);
 
   React.useEffect(() => {
-    if (!id) return;
-    
-    const fetchDetails = async () => {
-      setIsLoadingDetails(true);
-      try {
-        const data = await apiFetch(`/api/employees/${id}`).then(res => res.json());
-        setDetailedData({
-          applications: data.requests || [],
-          passes: data.passes || []
-        });
-      } catch (err) {
-        console.error("Failed to fetch employee details:", err);
-      } finally {
-        setIsLoadingDetails(false);
-      }
-    };
-
+    setIsLoadingDetails(true);
+    setDetailedData(null);
     fetchDetails();
-  }, [id]);
+  }, [fetchDetails]);
+  React.useEffect(() => onDataChanged(resources => {
+    if (resources.some(r => r === 'employees' || r === 'passes' || r === 'passApplications')) fetchDetails();
+  }), [fetchDetails]);
+
+  const employee = detailedData?.employee || undefined;
 
   const [showHistory, setShowHistory] = useState(false);
 
-  // Passes and applications come from the app-wide lists (kept fresh by the realtime feed), so status
-  // changes appear without a reload and without a second polling loop on this page.
-  const livePasses = passes.filter(p => p.employeeId === id);
-  const allEmployeePasses = livePasses.length > 0 ? livePasses : (detailedData?.passes || []);
-  const liveApplications = applications
-    .filter(a => id && (a.employeeIds || []).includes(id))
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  const allEmployeeApplications = liveApplications.length > 0 ? liveApplications : (detailedData?.applications || []);
+  const allEmployeePasses = detailedData?.passes || [];
+  const allEmployeeApplications = detailedData?.applications || [];
 
   // History (expired / replaced / revoked / closed) is retained but shown only on request.
   const employeePasses = allEmployeePasses.filter(p => showHistory || !isHistoryStatus(p.status));
@@ -90,6 +91,9 @@ export function EmployeeDetail({
   const employeeApplications = allEmployeeApplications.filter(a => showHistory || !isClosedApp(a));
   const historyAppCount = allEmployeeApplications.filter(isClosedApp).length;
 
+  if (!employee && isLoadingDetails) {
+    return <div className="p-12 text-center text-xs text-[#6B7280]">Loading…</div>;
+  }
   if (!employee) {
     return (
       <div className="p-12 text-center bg-white rounded-3xl border border-[#E5E7EB]">
@@ -397,7 +401,7 @@ export function EmployeeDetail({
           departments={departments}
           projects={projects}
           onClose={() => setIsEditModalOpen(false)}
-          onSuccess={onSuccess}
+          onSuccess={() => { onSuccess(); fetchDetails(); }}
         />
       </Modal>
 

@@ -20,13 +20,25 @@ import {
   Pass, PassApplication, Employee, Location, Category, AccessCode, Project, 
   UserProfile, AppAction 
 } from '../../types';
-import { cn, formatDate, parseToYMD } from '../../lib/utils';
+import { apiFetch, cn, formatDate, parseToYMD } from '../../lib/utils';
+import { onDataChanged } from '../../lib/realtime';
 import { usePagedList } from '../../hooks/usePagedList';
 import { parseExcelDate, detectEmployeeUpdates } from '../../utils/excelUtils';
 import { getApplicationBadgeProps, resolvePersonnelStatus, PassBreakdownStats } from '../../utils/passStatus';
 
 // One row of the server-side list: the application plus its rolled-up status, stage counts and
 // location name (worked out by the database).
+// One person on an application, with their latest pass on it (GET /api/passApplications/:id/roster)
+interface RosterRow {
+  employeeId: string;
+  name: string | null;
+  employeeCode: string | null;
+  qatarId: string | null;
+  jobTitle: string | null;
+  department: string | null;
+  pass: { id: string; passNumber: string | null; status: string; startDate: string | null; expiryDate: string | null } | null;
+}
+
 type ListedApplication = PassApplication & {
   rollupStatus?: string;
   locationName?: string | null;
@@ -35,9 +47,6 @@ type ListedApplication = PassApplication & {
 };
 
 export interface PassApplicationsViewProps {
-  passes: Pass[];
-  applications: PassApplication[];
-  employees: Employee[];
   locations: Location[];
   categories: Category[];
   accessCodes: AccessCode[];
@@ -55,8 +64,6 @@ export interface PassApplicationsViewProps {
 }
 
 export function PassApplicationsView({
-  passes,
-  employees,  
   locations, 
   categories, 
   accessCodes, 
@@ -199,6 +206,37 @@ export function PassApplicationsView({
     if (observerTarget.current) observer.observe(observerTarget.current);
     return () => observer.disconnect();
   }, [hasMore, loadMore]);
+
+  // People on an expanded card (details + latest pass), loaded from the server per application and
+  // reloaded when passes, applications or employees change.
+  const [rosters, setRosters] = useState<Record<string, RosterRow[]>>({});
+  const rosterLoading = useRef<Set<string>>(new Set());
+  const loadRoster = async (appId: string) => {
+    if (rosterLoading.current.has(appId)) return;
+    rosterLoading.current.add(appId);
+    try {
+      const res = await apiFetch(`/api/passApplications/${encodeURIComponent(appId)}/roster`);
+      if (res.ok) {
+        const rows: RosterRow[] = await res.json();
+        setRosters(prev => ({ ...prev, [appId]: rows }));
+      }
+    } catch { /* the card shows names once it loads */ } finally {
+      rosterLoading.current.delete(appId);
+    }
+  };
+  const expandedIds = displayedApps.filter(a => expandedApplications[a.id.toUpperCase()]).map(a => a.id);
+  const expandedKey = expandedIds.join(',');
+  useEffect(() => {
+    expandedIds.filter(id => !rosters[id]).forEach(loadRoster);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedKey]);
+  useEffect(() => onDataChanged(resources => {
+    if (resources.some(r => r === 'passes' || r === 'passApplications' || r === 'employees')) {
+      setRosters({});
+      expandedIds.forEach(loadRoster);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [expandedKey]);
 
   const locationOf = (app: ListedApplication): Pick<Location, 'name' | 'code' | 'categoryId'> | undefined =>
     locations.find(l => l.id === app.locationId) ||
@@ -397,13 +435,7 @@ export function PassApplicationsView({
           const loc = locationOf(app);
           const stats = app.stats || { activeCollectedCount: 0, issuedCount: 0, acceptedCount: 0, processingCount: 0, pendingCount: 0, cancelledCount: 0, total: 0 };
           const badgeProps = getApplicationBadgeProps(app.rollupStatus || app.status, app.employeeIds.length);
-          // Passes for the roster, only when the card is opened
-          const passesForApp = isExpanded ? passes.filter(p => {
-            const pReqId = (p.requestId || p.applicationId || '').trim().toUpperCase();
-            const pAuthId = (p.authorityAppNumber || '').trim().toUpperCase();
-            const appIdUpper = app.id.trim().toUpperCase();
-            return pReqId === appIdUpper || (pAuthId && pAuthId === appIdUpper);
-          }) : [];
+          const roster = rosters[app.id] || [];
 
           return (
             <div 
@@ -692,8 +724,9 @@ export function PassApplicationsView({
                         </thead>
                         <tbody className="divide-y divide-gray-100 font-medium text-gray-700">
                           {app.employeeIds.map(empId => {
-                            const emp = employees.find(e => e.id === empId);
-                            const empPass = passesForApp.find(p => p.employeeId === empId);
+                            const row = roster.find(r => r.employeeId === empId);
+                            const emp = row ? { name: row.name, employeeId: row.employeeCode, qatarId: row.qatarId, jobTitle: row.jobTitle, department: row.department } : undefined;
+                            const empPass = row?.pass || undefined;
                             const rawStatus = app.employeeStatuses?.[empId] || app.status || 'pending';
                             const resolved = resolvePersonnelStatus(rawStatus, empPass?.status, app.status);
 

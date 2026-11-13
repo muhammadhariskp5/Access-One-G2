@@ -154,11 +154,12 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
     let connection;
     try {
       connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
 
-      // 1. Fetch employee details
+      // 1. Fetch employee details (live, and in the caller's organization)
       const empResult = await connection.execute(
-        `SELECT * FROM employees WHERE id = :id`,
-        [req.params.id],
+        `SELECT * FROM employees WHERE id = :id AND deletedAt IS NULL${orgId ? ' AND organizationId = :orgId' : ''}`,
+        orgId ? { id: req.params.id, orgId } : { id: req.params.id },
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
 
@@ -182,7 +183,10 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         ...toCamelCase(r),
         employeeIds: JSON.parse(r.EMPLOYEEIDS || '[]'),
         employeeStatuses: JSON.parse(r.EMPLOYEESTATUSES || '{}'),
-        accessCodes: JSON.parse(r.ACCESSCODES || '[]')
+        temporaryNames: JSON.parse(r.TEMPORARYNAMES || '[]'),
+        accessCodes: JSON.parse(r.ACCESSCODES || '[]'),
+        individualExpiries: JSON.parse(r.INDIVIDUALEXPIRIES || '{}'),
+        individualStartDates: JSON.parse(r.INDIVIDUALSTARTDATES || '{}')
       })) || [];
 
       // 3. Fetch linked passes
@@ -228,7 +232,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         const maxEmp = (orgRes.rows[0] as any).MAXEMPLOYEES;
         if (maxEmp && maxEmp > 0) {
           const empCountRes = await connection.execute(
-            `SELECT COUNT(*) AS CNT FROM employees WHERE organizationId = :orgId`,
+            `SELECT COUNT(*) AS CNT FROM employees WHERE organizationId = :orgId AND deletedAt IS NULL`,
             [effectiveOrgId],
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
@@ -243,7 +247,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
 
       // Duplicate Check: EMP CODE (employeeId) or QID/Visa (qidVisaNumber) within organization
       if (data.employeeId || data.qidVisaNumber) {
-        const checkSql = `SELECT id, name FROM employees WHERE ((employeeId = :employeeId AND employeeId IS NOT NULL) OR (qidVisaNumber = :qidVisaNumber AND qidVisaNumber IS NOT NULL)) AND (organizationId = :orgId OR organizationId IS NULL)`;
+        const checkSql = `SELECT id, name FROM employees WHERE ((employeeId = :employeeId AND employeeId IS NOT NULL) OR (qidVisaNumber = :qidVisaNumber AND qidVisaNumber IS NOT NULL)) AND (organizationId = :orgId OR organizationId IS NULL) AND deletedAt IS NULL`;
         const checkResult = await connection.execute(checkSql, { 
           employeeId: data.employeeId || null, 
           qidVisaNumber: data.qidVisaNumber || null,
@@ -327,7 +331,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         const maxEmp = (orgRes.rows[0] as any).MAXEMPLOYEES;
         if (maxEmp && maxEmp > 0) {
           const empCountRes = await connection.execute(
-            `SELECT COUNT(*) AS CNT FROM employees WHERE organizationId = :orgId`,
+            `SELECT COUNT(*) AS CNT FROM employees WHERE organizationId = :orgId AND deletedAt IS NULL`,
             [effectiveOrgId],
             { outFormat: oracledb.OUT_FORMAT_OBJECT }
           );
@@ -386,7 +390,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
 
         // Duplicate Check: EMP CODE (employeeId) or QID/Visa (qidVisaNumber)
         if (empData.employeeId || empData.qidVisaNumber) {
-          const checkSql = `SELECT id, name FROM employees WHERE ((employeeId = :employeeId AND employeeId IS NOT NULL) OR (qidVisaNumber = :qidVisaNumber AND qidVisaNumber IS NOT NULL)) AND (organizationId = :orgId OR organizationId IS NULL)`;
+          const checkSql = `SELECT id, name FROM employees WHERE ((employeeId = :employeeId AND employeeId IS NOT NULL) OR (qidVisaNumber = :qidVisaNumber AND qidVisaNumber IS NOT NULL)) AND (organizationId = :orgId OR organizationId IS NULL) AND deletedAt IS NULL`;
           const checkResult = await connection.execute(checkSql, { 
             employeeId: empData.employeeId || null, 
             qidVisaNumber: empData.qidVisaNumber || null,

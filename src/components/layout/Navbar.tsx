@@ -24,7 +24,6 @@ interface NavbarProps {
   company: BrandingSettings | null;
   globalSearch: string;
   setGlobalSearch: (s: string) => void;
-  employees: Employee[];
   handleLogout?: () => void;
 }
 
@@ -33,7 +32,6 @@ export function Navbar({
   company, 
   globalSearch, 
   setGlobalSearch, 
-  employees,
   handleLogout 
 }: NavbarProps) {
   const location = useLocation();
@@ -126,12 +124,10 @@ export function Navbar({
         const to = `/${segments.slice(0, index + 1).join('/')}`;
         let label = segment.charAt(0).toUpperCase() + segment.slice(1);
         
-        if (segment === 'employees' && segments[index + 1]) {
-          const emp = employees.find(e => e.id === segments[index + 1]);
-          if (emp) label = 'Employees';
+        if (segment === 'employees') {
+          label = 'Employees';
         } else if (segments[index - 1] === 'employees') {
-          const emp = employees.find(e => e.id === segment);
-          if (emp) label = emp.name;
+          label = 'Employee Details';
         } else if (segment === 'status-management') {
           label = 'Status Management';
         } else if (segment === 'matrix') {
