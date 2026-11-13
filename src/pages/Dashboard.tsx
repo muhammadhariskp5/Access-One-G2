@@ -5,7 +5,7 @@ import { Users, ShieldCheck, Clock, FileText, Printer } from 'lucide-react';
 import { StatCard } from '../components/common/StatCard';
 import { cn, formatDate } from '../lib/utils';
 import { Employee, Pass, PassApplication, Location, Category, BrandingSettings, UserProfile } from '../types';
-import { resolvePersonnelStatus, getApplicationBadgeProps } from '../utils/passStatus';
+import { resolvePersonnelStatus, getApplicationBadgeProps, isHistoryStatus } from '../utils/passStatus';
 import { PrintExportModal } from '../components/common/PrintExportModal';
 
 interface DashboardProps {
@@ -33,8 +33,10 @@ export function Dashboard({
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const isActivePassStatus = (status: string) => ['active', 'collected', 'completed', 'approved'].includes(status);
   const activePasses = passes.filter(p => isActivePassStatus(p.status));
+  // In progress = not completed and not closed. Closed includes the statuses the daily lifecycle
+  // job sets when passes end (expired, replaced), not only the ones people set by hand.
   const activeApplications = useMemo(() => {
-    return applications.filter(a => a.status !== 'completed' && a.status !== 'rejected' && a.status !== 'cancelled' && a.status !== 'archived');
+    return applications.filter(a => (a.status || '').toLowerCase() !== 'completed' && !isHistoryStatus(a.status));
   }, [applications]);
   const expiring48h = passes.filter(p => {
     if (!isActivePassStatus(p.status) || !p.expiryDate) return false;
@@ -100,9 +102,11 @@ export function Dashboard({
         );
       });
     }
+    // Newest submissions first ("By <requester>" is who submitted). Sorting by last update let
+    // automatic expiry closures (made by the system, not a person) push real activity off the list.
     return [...list].sort((a, b) => {
-      const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
-      const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      const timeA = new Date(a.createdAt || a.updatedAt || 0).getTime();
+      const timeB = new Date(b.createdAt || b.updatedAt || 0).getTime();
       return timeB - timeA;
     });
   }, [applications, locations, globalSearch]);
