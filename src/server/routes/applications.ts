@@ -12,15 +12,48 @@ import type { RealtimeClient } from "../realtime.ts";
 import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
+import { pageClause } from "../employeeQuery.ts";
+import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
 
 // applications routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerApplicationRoutes(app: express.Express, ctx: RouteContext) {
-  const { oracledb, logAction, createNotification, notifyAdmins, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId } = ctx;
+  const { oracledb, logAction, createNotification, notifyAdmins, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, getDbEngine } = ctx;
   app.get("/api/passApplications", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {
       connection = await getConnection();
       const { orgId } = await getTenantOrgId(req, connection);
+
+      // Paged mode (Applications screen): the database searches, filters, rolls up each
+      // application's status from its people and pages the list.
+      // ?page=&pageSize=&q=&status=&type=&from=&to=&sort=newest|oldest&tab=active|archived  or  &all=1
+      // Returns { items, total, page, pageSize, activeCount, archivedCount }.
+      if (req.query.page !== undefined || req.query.all !== undefined) {
+        const f = parseApplicationListQuery(req.query as Record<string, unknown>);
+        const engine = getDbEngine();
+        const { from, where, binds } = buildApplicationList(f, orgId || null);
+        const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+        const countRes = await connection.execute(`SELECT ${APPLICATION_COUNT_COLUMNS} FROM ${from} WHERE ${where}`, binds, opts);
+        const c: any = countRes.rows?.[0] || {};
+        const all = Number(c.CNT ?? c.cnt ?? 0);
+        const archivedCount = Number(c.ARCHIVEDCNT ?? c.archivedCnt ?? c.archivedcnt ?? 0);
+        const activeCount = all - archivedCount;
+        // History is kept in full but only listed on a search (2+ characters); its count still shows.
+        const historyHidden = f.tab === 'archived' && f.q.length < 2;
+        const total = historyHidden ? 0 : f.tab === 'active' ? activeCount : f.tab === 'archived' ? archivedCount : all;
+        const limit = f.all ? APP_EXPORT_MAX : f.pageSize;
+        const offset = f.all ? 0 : (f.page - 1) * f.pageSize;
+        let items: any[] = [];
+        if (total > 0) {
+          const rowsRes = await connection.execute(
+            `SELECT ${APPLICATION_LIST_COLUMNS} FROM ${from} WHERE ${where}${applicationTabClause(f)} ${applicationOrderBy(f)} ${pageClause(engine, offset, limit)}`,
+            binds, opts
+          );
+          items = (rowsRes.rows || []).map((r: any) => mapApplicationRow(r, toCamelCase));
+        }
+        return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit, activeCount, archivedCount });
+      }
+
       let sql = `SELECT * FROM passRequests WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId) {

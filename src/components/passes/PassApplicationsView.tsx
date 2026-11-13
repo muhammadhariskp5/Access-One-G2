@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -20,15 +20,19 @@ import {
   Pass, PassApplication, Employee, Location, Category, AccessCode, Project, 
   UserProfile, AppAction 
 } from '../../types';
-import { apiFetch, cn, formatDate, isPassInDateRange } from '../../lib/utils';
+import { cn, formatDate, parseToYMD } from '../../lib/utils';
+import { usePagedList } from '../../hooks/usePagedList';
 import { parseExcelDate, detectEmployeeUpdates } from '../../utils/excelUtils';
-import { 
-  calculateApplicationStats, 
-  getApplicationBadgeProps, 
-  resolvePersonnelStatus, 
-  computeApplicationRollupStatus, 
-  filterPassApplicationItem 
-} from '../../utils/passStatus';
+import { getApplicationBadgeProps, resolvePersonnelStatus, PassBreakdownStats } from '../../utils/passStatus';
+
+// One row of the server-side list: the application plus its rolled-up status, stage counts and
+// location name (worked out by the database).
+type ListedApplication = PassApplication & {
+  rollupStatus?: string;
+  locationName?: string | null;
+  locationCode?: string | null;
+  stats?: Pick<PassBreakdownStats, 'activeCollectedCount' | 'issuedCount' | 'acceptedCount' | 'processingCount' | 'pendingCount' | 'cancelledCount' | 'total'>;
+};
 
 export interface PassApplicationsViewProps {
   passes: Pass[];
@@ -50,10 +54,9 @@ export interface PassApplicationsViewProps {
   setShowReplay: (show: boolean) => void;
 }
 
-export function PassApplicationsView({ 
-  passes, 
-  applications, 
-  employees, 
+export function PassApplicationsView({
+  passes,
+  employees,  
   locations, 
   categories, 
   accessCodes, 
@@ -162,60 +165,68 @@ export function PassApplicationsView({
     }
   }, [location]);
 
-  // Compute applications list and statistics
-  const filteredApps = useMemo(() => {
-    return applications.filter(app => {
-      const s = globalSearch.toLowerCase();
-      const loc = locations.find(l => l.id === app.locationId);
-      const matchesSearch = !s || Boolean(
-        app.id.toLowerCase().includes(s) ||
-        app.authorityAppNumber?.toLowerCase().includes(s) ||
-        loc?.name?.toLowerCase().includes(s) ||
-        app.employeeIds.some(empId => {
-          const emp = employees.find(e => e.id === empId);
-          return emp?.name?.toLowerCase().includes(s) || emp?.employeeId?.toLowerCase().includes(s) || emp?.qatarId?.toLowerCase().includes(s);
-        })
-      );
-      const matchesStatus = filterPassApplicationItem(app.status, statusFilter);
-      const matchesType = filterType === 'all' || app.type === filterType;
-      const matchesDate = isPassInDateRange(app, startDateFilter, endDateFilter);
-      return matchesSearch && matchesStatus && matchesType && matchesDate;
-    }).sort((a, b) => {
-      if (queueSortBy === 'oldest') {
-        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-      }
-      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-    });
-  }, [applications, globalSearch, statusFilter, filterType, startDateFilter, endDateFilter, queueSortBy, employees, locations]);
+  // The database searches, filters, rolls up each application's status and pages the list; the
+  // screen holds the rows loaded so far. History is kept in full but listed only on a search.
+  const historySearchActive = globalSearch.trim().length >= 2;
+  const {
+    items: displayedApps,
+    total: totalMatching,
+    extra: listExtra,
+    loading: listLoading,
+    loadingMore,
+    error: listError,
+    hasMore,
+    loadMore,
+    fetchAll: fetchAllMatching,
+  } = usePagedList<ListedApplication>('/api/passApplications', {
+    q: globalSearch,
+    status: statusFilter,
+    type: filterType,
+    from: parseToYMD(startDateFilter),
+    to: parseToYMD(endDateFilter),
+    sort: queueSortBy,
+    tab: activeTab,
+  }, ['passApplications', 'passes', 'employees', 'locations']);
+  const activeCount = Number(listExtra.activeCount ?? 0);
+  const archivedCount = Number(listExtra.archivedCount ?? 0);
 
-  const isArchivedApp = (app: PassApplication) => {
-    const s = (app.status || '').toLowerCase();
-    if (['archived', 'completed', 'rejected', 'cancelled', 'expired', 'replaced'].includes(s)) {
-      return true;
+  const observerTarget = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting && hasMore) loadMore(); },
+      { threshold: 1.0 }
+    );
+    if (observerTarget.current) observer.observe(observerTarget.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore]);
+
+  const locationOf = (app: ListedApplication): Pick<Location, 'name' | 'code' | 'categoryId'> | undefined =>
+    locations.find(l => l.id === app.locationId) ||
+    (app.locationName ? ({ name: app.locationName, code: app.locationCode || undefined } as Pick<Location, 'name' | 'code' | 'categoryId'>) : undefined);
+
+  // Export and print use every matching row, fetched when needed.
+  const [printRows, setPrintRows] = useState<ListedApplication[]>([]);
+  const openPrint = async () => {
+    try {
+      setPrintRows(await fetchAllMatching());
+      setIsPrintModalOpen(true);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load applications for printing', 'error');
     }
-    // Also check if all members are cancelled or completed
-    const passesForApp = passes.filter(p => {
-      const pReqId = (p.requestId || p.applicationId || '').trim().toUpperCase();
-      const pAuthId = (p.authorityAppNumber || '').trim().toUpperCase();
-      const appIdUpper = app.id.trim().toUpperCase();
-      return pReqId === appIdUpper || (pAuthId && pAuthId === appIdUpper);
-    });
-    const stats = calculateApplicationStats(app.employeeIds, app.employeeStatuses || {}, passesForApp);
-    const computed = computeApplicationRollupStatus(app.status, stats);
-    return ['archived', 'completed', 'rejected', 'cancelled', 'expired', 'replaced'].includes(computed);
   };
 
-  const activeApps = useMemo(() => filteredApps.filter(a => !isArchivedApp(a)), [filteredApps, passes]);
-  const archivedApps = useMemo(() => filteredApps.filter(a => isArchivedApp(a)), [filteredApps, passes]);
+  const handleExportExcel = async () => {
+    let exportApps: ListedApplication[];
+    try {
+      exportApps = await fetchAllMatching();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load applications for export', 'error');
+      return;
+    }
 
-  // History is retained in full but only listed on a specific search (name, QID, emp code, app/pass no.)
-  const historySearchActive = globalSearch.trim().length >= 2;
-  const displayedApps = activeTab === 'active' ? activeApps : (historySearchActive ? archivedApps : []);
-
-  const handleExportExcel = () => {
     const workbook = XLSX.utils.book_new();
 
-    const columnMap: Record<string, { label: string; getVal: (app: PassApplication, idx: number) => string; wch: number }> = {
+    const columnMap: Record<string, { label: string; getVal: (app: ListedApplication, idx: number) => string; wch: number }> = {
       ref: {
         label: "Application Ref",
         getVal: (app) => `#${app.id.toUpperCase()}`,
@@ -228,10 +239,7 @@ export function PassApplicationsView({
       },
       location: {
         label: "Location",
-        getVal: (app) => {
-          const loc = locations.find(l => l.id === app.locationId);
-          return loc?.name || '—';
-        },
+        getVal: (app) => locationOf(app)?.name || '—',
         wch: 25
       },
       type: {
@@ -254,7 +262,7 @@ export function PassApplicationsView({
       },
       status: {
         label: "Status",
-        getVal: (app) => app.status.toUpperCase(),
+        getVal: (app) => (app.rollupStatus || app.status || '').toUpperCase(),
         wch: 14
       }
     };
@@ -265,7 +273,7 @@ export function PassApplicationsView({
 
     const headers = ["S/N", ...activeColDefs.map(c => c.label)];
 
-    const rows = displayedApps.map((app, index) => {
+    const rows = exportApps.map((app, index) => {
       return [
         (index + 1).toString(),
         ...activeColDefs.map(c => c.getVal(app, index))
@@ -274,7 +282,7 @@ export function PassApplicationsView({
 
     const worksheet = XLSX.utils.aoa_to_sheet([
       ["PASS APPLICATIONS QUEUE REPORT"],
-      [`Exported: ${new Date().toLocaleDateString()} | Total: ${displayedApps.length} Applications`],
+      [`Exported: ${new Date().toLocaleDateString()} | Total: ${exportApps.length} Applications`],
       [],
       headers,
       ...rows
@@ -304,7 +312,7 @@ export function PassApplicationsView({
                   : "bg-gray-50 text-gray-600 hover:bg-gray-100"
               )}
             >
-              Active Applications ({activeApps.length})
+              Active Applications ({activeCount})
             </button>
             <button 
               onClick={() => setActiveTab('archived')}
@@ -315,7 +323,7 @@ export function PassApplicationsView({
                   : "bg-gray-50 text-gray-600 hover:bg-gray-100"
               )}
             >
-              History / Archived ({archivedApps.length})
+              History / Archived ({archivedCount})
             </button>
           </div>
 
@@ -335,7 +343,7 @@ export function PassApplicationsView({
               <span>Columns</span>
             </button>
             <button
-              onClick={() => setIsPrintModalOpen(true)}
+              onClick={openPrint}
               className="h-9 px-3.5 bg-white text-gray-700 hover:bg-gray-50 rounded-xl border border-gray-200 transition-all flex items-center gap-1.5 text-xs font-bold cursor-pointer shadow-2xs"
               title="Print or Export Queue"
             >
@@ -386,20 +394,16 @@ export function PassApplicationsView({
       <div className="space-y-4">
         {displayedApps.map((app) => {
           const isExpanded = !!expandedApplications[app.id.toUpperCase()];
-          const loc = locations.find(l => l.id === app.locationId);
-          const passesForApp = passes.filter(p => {
+          const loc = locationOf(app);
+          const stats = app.stats || { activeCollectedCount: 0, issuedCount: 0, acceptedCount: 0, processingCount: 0, pendingCount: 0, cancelledCount: 0, total: 0 };
+          const badgeProps = getApplicationBadgeProps(app.rollupStatus || app.status, app.employeeIds.length);
+          // Passes for the roster, only when the card is opened
+          const passesForApp = isExpanded ? passes.filter(p => {
             const pReqId = (p.requestId || p.applicationId || '').trim().toUpperCase();
             const pAuthId = (p.authorityAppNumber || '').trim().toUpperCase();
             const appIdUpper = app.id.trim().toUpperCase();
             return pReqId === appIdUpper || (pAuthId && pAuthId === appIdUpper);
-          });
-          const stats = calculateApplicationStats(app.employeeIds, app.employeeStatuses || {}, passesForApp, app.status);
-          const computedStatus = computeApplicationRollupStatus(app.status, stats);
-          const badgeProps = getApplicationBadgeProps(computedStatus, app.employeeIds.length);
-
-          const unissuedEmployeeIds = app.employeeIds.filter(empId => {
-            return !passesForApp.some(p => p.employeeId === empId);
-          });
+          }) : [];
 
           return (
             <div 
@@ -827,14 +831,17 @@ export function PassApplicationsView({
           );
         })}
 
-        {displayedApps.length === 0 && (
+        {listError && (
+          <div className="py-6 text-center text-rose-600 text-xs font-semibold">{listError}</div>
+        )}
+        {!listLoading && !listError && displayedApps.length === 0 && (
           <div className="py-16 text-center bg-white rounded-2xl border border-dashed border-gray-200">
             <FileText size={32} className="mx-auto mb-3 text-gray-300" />
             {activeTab === 'archived' && !historySearchActive ? (
               <>
                 <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">History is search-only</p>
                 <p className="text-[11px] text-gray-400 mt-1">
-                  {archivedApps.length} closed / expired applications are retained. Search by name, QID, employee code or application number to view them.
+                  {archivedCount} closed / expired applications are retained. Search by name, QID, employee code or application number to view them.
                 </p>
               </>
             ) : (
@@ -842,20 +849,30 @@ export function PassApplicationsView({
             )}
           </div>
         )}
+        <div ref={observerTarget} className="h-10 flex items-center justify-center">
+          {(listLoading || loadingMore) && (
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Loading...</span>
+          )}
+          {!listLoading && !loadingMore && hasMore && (
+            <button onClick={() => loadMore()} className="text-[10px] font-bold text-[#800020] uppercase tracking-wider cursor-pointer">
+              Load more ({displayedApps.length} of {totalMatching})
+            </button>
+          )}
+        </div>
       </div>
 
       <PrintExportModal 
         isOpen={isPrintModalOpen} 
         onClose={() => setIsPrintModalOpen(false)} 
         title="Export Queue Applications / Print Report"
-        documentTitle={`Applications_Queue_${displayedApps.length}_Records`}
+        documentTitle={`Applications_Queue_${printRows.length}_Records`}
         onExportExcel={handleExportExcel}
       >
         <div className="space-y-4">
           <div className="flex justify-between items-center border-b border-[#E5E7EB] pb-3">
             <div>
               <h2 className="text-base font-black text-[#800020] uppercase tracking-tight">Pass Applications Queue Report</h2>
-              <p className="text-[10px] text-[#6B7280] font-bold">Showing {displayedApps.length} applications in current view</p>
+              <p className="text-[10px] text-[#6B7280] font-bold">Showing {printRows.length} applications in current view</p>
             </div>
             <button
               onClick={handleExportExcel}
@@ -890,8 +907,8 @@ export function PassApplicationsView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
-                {displayedApps.map((app, idx) => {
-                  const loc = locations.find(l => l.id === app.locationId);
+                {printRows.map((app, idx) => {
+                  const loc = locationOf(app);
                   return (
                     <tr key={app.id} className={cn("text-[9px]", idx % 2 === 0 ? "bg-white" : "bg-[#F9FAFB]")}>
                       <td className="p-2 text-center font-bold text-gray-500 border-r border-gray-200">{idx + 1}</td>
@@ -935,7 +952,7 @@ export function PassApplicationsView({
                           return (
                             <td key={colId} className="p-2">
                               <span className="px-2 py-0.5 rounded-full text-[8px] font-extrabold uppercase bg-gray-100 text-gray-800">
-                                {app.status}
+                                {app.rollupStatus || app.status}
                               </span>
                             </td>
                           );

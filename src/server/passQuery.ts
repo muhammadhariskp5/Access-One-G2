@@ -10,7 +10,7 @@ export const PASS_EXPORT_MAX = 20000;
 const HISTORY = ['expired', 'replaced', 'superseded', 'revoked', 'cancelled', 'rejected', 'archived', 'inactive', 'deleted'];
 
 // Status filter -> statuses it matches (mirrors filterPassApplicationItem in utils/passStatus.ts)
-const STATUS_GROUPS: Record<string, string[]> = {
+export const STATUS_GROUPS: Record<string, string[]> = {
   active: ['active', 'collected', 'completed'],
   collected: ['active', 'collected', 'completed'],
   issued: ['issued', 'ready_for_collection', 'partially_issued'],
@@ -31,7 +31,7 @@ const STATUS_GROUPS: Record<string, string[]> = {
 };
 
 // A stored date (ISO, YYYY/MM/DD or DD-MM-YYYY / DD/MM/YYYY) as YYYY-MM-DD, like parseToYMD.
-function ymd(expr: string): string {
+export function ymd(expr: string): string {
   const e = `NULLIF(TRIM(${expr}), '')`;
   return `(CASE WHEN SUBSTR(${e}, 3, 1) IN ('-', '/') AND SUBSTR(${e}, 6, 1) IN ('-', '/')
     THEN SUBSTR(${e}, 7, 4) || '-' || SUBSTR(${e}, 4, 2) || '-' || SUBSTR(${e}, 1, 2)
