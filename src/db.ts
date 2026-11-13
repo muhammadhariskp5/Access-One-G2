@@ -435,7 +435,8 @@ export async function initializeDatabase() {
         id VARCHAR2(50) PRIMARY KEY,
         requestId VARCHAR2(50) NOT NULL,
         employeeId VARCHAR2(50) NOT NULL,
-        status VARCHAR2(50) DEFAULT 'pending'
+        status VARCHAR2(50) DEFAULT 'pending',
+        expiryDate VARCHAR2(50)
       )`,
       `CREATE TABLE passRequestAccessCodes (
         id VARCHAR2(50) PRIMARY KEY,
@@ -1064,6 +1065,17 @@ export async function initializeDatabase() {
             logger.info(`Added ${col} column to ${table}.`);
           }
         }
+      }
+    }
+
+    // Each person's own expiry on an application (mirrors passRequests.individualExpiries)
+    try {
+      await connection.execute(`SELECT expiryDate FROM passRequestEmployees WHERE 1=0`);
+    } catch (err: any) {
+      if (/ORA-00904|no such column/i.test(String(err?.message))) {
+        await connection.execute(`ALTER TABLE passRequestEmployees ADD (expiryDate VARCHAR2(50))`);
+        await connection.commit();
+        logger.info('Added expiryDate column to passRequestEmployees.');
       }
     }
 

@@ -1692,6 +1692,24 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         await conn.commit();
         await enforceForeignKeys(conn, getDbEngine());
       }
+    },
+    {
+      // Server-side pass list: each person's own expiry now lives on the link row, and the list
+      // looks passes up by exact application ID + employee (the older index is on UPPER(requestId)).
+      id: '2026-11-13-pass-list-expiry-and-indexes',
+      run: async (conn) => {
+        const res = await conn.execute(`SELECT id FROM passRequests`, {}, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        for (const r of (res.rows || []) as any[]) {
+          await syncRequestEmployees(conn, r.ID || r.id);
+        }
+        for (const sql of [
+          `CREATE INDEX idx_passes_request ON passes (requestId, employeeId)`
+        ]) {
+          try { await conn.execute(sql); } catch (e: any) {
+            if (!/ORA-00955|ORA-01408|already exists/i.test(String(e?.message))) throw e;
+          }
+        }
+      }
     }
   ];
 

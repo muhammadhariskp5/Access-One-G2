@@ -152,20 +152,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         values
       );
 
-      // Populate passRequestEmployees mapping table for live searchability
-      const initialEmployeeStatus = initialAppStatus;
-      for (const empId of employeeIds) {
-        await connection.execute(
-          `INSERT INTO passRequestEmployees (id, requestId, employeeId, status) 
-           VALUES (:id, :requestId, :employeeId, :status)`,
-          {
-            id: newId(),
-            requestId: requestId,
-            employeeId: empId,
-            status: initialEmployeeStatus
-          }
-        );
-      }
+      // Populate passRequestEmployees mapping table (status + per-person expiry)
+      await syncRequestEmployees(connection, requestId);
 
       // Populate passRequestAccessCodes mapping table
       const accessCodeIds = Array.from(new Set(req.body.accessCodeIds || []));
@@ -412,13 +400,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       { statuses: JSON.stringify(employeeStatuses), updatedAt: now, id: applicationId }
     );
 
-    for (const empId of employeeIds) {
-      const s = employeeStatuses[empId] || normStatus;
-      await connection.execute(
-        `UPDATE passRequestEmployees SET status = :status WHERE UPPER(requestId) = UPPER(:id) AND employeeId = :empId`,
-        { status: s, id: applicationId, empId }
-      );
-    }
+    await syncRequestEmployees(connection, applicationId);
 
     return employeeStatuses;
   }

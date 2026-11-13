@@ -6,6 +6,8 @@ import { debugLog, logger } from "../log.ts";
 import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
+import { pageClause } from "../employeeQuery.ts";
+import { parsePassListQuery, buildPassList, passOrderBy, mapPassRow, PASS_LIST_COLUMNS, PASS_EXPORT_MAX } from "../passQuery.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
 import type { RealtimeClient } from "../realtime.ts";
@@ -15,12 +17,34 @@ import type { RouteContext } from "../context.ts";
 
 // passes routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
-  const { oracledb, logAction, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, closeApplicationsForEndedPasses } = ctx;
+  const { oracledb, logAction, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, closeApplicationsForEndedPasses, getDbEngine } = ctx;
   app.get("/api/passes", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {
       connection = await getConnection();
       const { orgId } = await getTenantOrgId(req, connection);
+
+      // Paged mode (Pass Status Management): live passes plus people on applications who have no
+      // pass yet, with employee/location names joined.
+      // ?page=&pageSize=&q=&status=&from=&to=&sort=&order=  or  &all=1 for export/print.
+      // Returns { items, total, page, pageSize }.
+      if (req.query.page !== undefined || req.query.all !== undefined) {
+        const f = parsePassListQuery(req.query as Record<string, unknown>);
+        const engine = getDbEngine();
+        const { from, where, binds } = buildPassList(engine, f, orgId || null);
+        const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+        const countRes = await connection.execute(`SELECT COUNT(*) AS cnt FROM ${from} WHERE ${where}`, binds, opts);
+        const total = Number((countRes.rows?.[0] as any)?.CNT ?? (countRes.rows?.[0] as any)?.cnt ?? 0);
+        const limit = f.all ? PASS_EXPORT_MAX : f.pageSize;
+        const offset = f.all ? 0 : (f.page - 1) * f.pageSize;
+        const rowsRes = await connection.execute(
+          `SELECT ${PASS_LIST_COLUMNS} FROM ${from} WHERE ${where} ${passOrderBy(f)} ${pageClause(engine, offset, limit)}`,
+          binds, opts
+        );
+        const items = (rowsRes.rows || []).map((r: any) => mapPassRow(r));
+        return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit });
+      }
+
       let sql = `SELECT * FROM passes WHERE deletedAt IS NULL`;
       const binds: any = {};
       if (orgId) {
@@ -213,19 +237,8 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         );
       }
 
-      // Populate mappings
-      for (const empId of employeeIds) {
-        await connection.execute(
-          `INSERT INTO passRequestEmployees (id, requestId, employeeId, status) 
-           VALUES (:id, :requestId, :employeeId, :status)`,
-          {
-            id: newId(),
-            requestId: requestId,
-            employeeId: empId,
-            status: initialEmployeeStatus
-          }
-        );
-      }
+      // Populate mappings (status + per-person expiry, from the request just written)
+      await syncRequestEmployees(connection, requestId);
 
       for (const acId of accessCodeIds) {
         await connection.execute(

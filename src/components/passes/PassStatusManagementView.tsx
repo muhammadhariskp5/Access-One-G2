@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Shield, CheckCircle2, XCircle, X, ChevronUp, ChevronDown, Check, Ban, AlertCircle, AlertTriangle, RefreshCw, Eye, Printer, Download
@@ -11,9 +11,35 @@ import { PrintExportModal } from '../common/PrintExportModal';
 import { 
   Pass, PassApplication, Employee, Location, Category, AccessCode, UserProfile, PassStatus, AppAction 
 } from '../../types';
-import { apiFetch, cn, formatDate, parseToYMD, isPassInDateRange } from '../../lib/utils';
-import { resolvePersonnelStatus, filterPassApplicationItem, getSkippedWorkflowStages, isHistoryStatus } from '../../utils/passStatus';
+import { apiFetch, cn, formatDate, parseToYMD } from '../../lib/utils';
+import { resolvePersonnelStatus, getSkippedWorkflowStages } from '../../utils/passStatus';
+import { usePagedList } from '../../hooks/usePagedList';
 import { StageSkipConfirmModal } from './StageSkipConfirmModal';
+
+// A row of the server-built list: a live pass, or a person on an application with no pass yet
+// (isVirtual), with the employee's and location's names joined in.
+export type ListedPass = Pass & {
+  isVirtual?: boolean;
+  employeeName?: string | null;
+  employeeCode?: string | null;
+  employeeQid?: string | null;
+  employeeJobTitle?: string | null;
+  locationName?: string | null;
+  locationCode?: string | null;
+};
+
+const parseCodes = (raw: unknown): string[] => {
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === 'string' && raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+    } catch {
+      return [raw];
+    }
+  }
+  return [];
+};
 
 export interface PassStatusManagementViewProps {
   passes: Pass[];
@@ -52,7 +78,7 @@ export function PassStatusManagementView({
   const [endDateFilter, setEndDateFilter] = useState<string>('');
   const [passSortField, setPassSortField] = useState<string>('employee');
   const [passSortOrder, setPassSortOrder] = useState<'asc' | 'desc'>('asc');
-  const [inspectingPass, setInspectingPass] = useState<Pass | null>(null);
+  const [inspectingPass, setInspectingPass] = useState<ListedPass | null>(null);
 
   const handlePassSort = (field: string) => {
     if (passSortField === field) {
@@ -91,138 +117,59 @@ export function PassStatusManagementView({
     onCancel?: () => void;
   } | null>(null);
 
-  const matchesId = (id1: string | null | undefined, id2: string | null | undefined) => {
-    if (!id1 || !id2) return false;
-    return id1.trim().toUpperCase() === id2.trim().toUpperCase();
+  // The database merges, filters, sorts and pages the list; the screen holds the rows loaded so far.
+  const {
+    items: passList,
+    total: totalMatching,
+    loading: listLoading,
+    loadingMore,
+    error: listError,
+    hasMore,
+    loadMore,
+    reload: reloadList,
+    fetchAll: fetchAllMatching,
+  } = usePagedList<ListedPass>('/api/passes', {
+    q: globalSearch,
+    status: filterStatus,
+    from: parseToYMD(startDateFilter),
+    to: parseToYMD(endDateFilter),
+    sort: passSortField,
+    order: passSortOrder,
+  }, ['passes', 'passApplications', 'employees', 'locations']);
+
+  const observerTarget = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting && hasMore) loadMore(); },
+      { threshold: 1.0 }
+    );
+    if (observerTarget.current) observer.observe(observerTarget.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore]);
+
+  // Selections only apply to what's on screen; clear them when the result set changes.
+  useEffect(() => {
+    setSelectedPasses([]);
+  }, [globalSearch, filterStatus, startDateFilter, endDateFilter]);
+
+  // Export and print use every matching row, fetched when needed.
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [printRows, setPrintRows] = useState<ListedPass[]>([]);
+  const openPrint = async () => {
+    try {
+      setPrintRows(await fetchAllMatching());
+      setIsPrintModalOpen(true);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load passes for printing', 'error');
+    }
   };
 
-  const allPassesCombined = useMemo(() => {
-    const list: Pass[] = [...passes];
-
-    applications.forEach(app => {
-      app.employeeIds.forEach(empId => {
-        const exists = list.some(p => {
-          const pReqId = p.requestId || p.applicationId;
-          return matchesId(app.id, pReqId) && p.employeeId === empId;
-        });
-
-        if (!exists) {
-          let rawEmpStatus = (app.employeeStatuses?.[empId] || app.status || 'pending').toLowerCase();
-          let status: PassStatus = 'pending';
-          if (rawEmpStatus === 'collected' || rawEmpStatus === 'completed') {
-            status = 'collected';
-          } else if (rawEmpStatus === 'accepted') {
-            status = 'accepted';
-          } else if (rawEmpStatus === 'approved') {
-            status = 'approved';
-          } else if (rawEmpStatus === 'cancelled') {
-            status = 'cancelled';
-          } else if (rawEmpStatus === 'rejected') {
-            status = 'rejected';
-          } else if (rawEmpStatus === 'active') {
-            status = 'active';
-          } else if (rawEmpStatus === 'expired') {
-            status = 'expired';
-          } else if (rawEmpStatus === 'replaced') {
-            status = 'replaced';
-          } else {
-            status = 'processing';
-          }
-
-          list.push({
-            id: `virtual-${app.id}-${empId}`,
-            applicationId: app.id,
-            requestId: app.id,
-            employeeId: empId,
-            locationId: app.locationId,
-            type: app.type || 'main',
-            parentPassId: app.parentPassId,
-            status: status,
-            passNumber: app.authorityAppNumber || app.id.toUpperCase(),
-            issueDate: app.createdAt,
-            expiryDate: app.individualExpiries?.[empId] || app.endDate,
-            authorityAppNumber: app.authorityAppNumber,
-            accessCodes: app.accessCodes || [],
-            createdAt: app.createdAt,
-            updatedAt: app.updatedAt
-          });
-        }
-      });
-    });
-
-    return list;
-  }, [passes, applications]);
-
-  const filteredPasses = useMemo(() => {
-    const list = allPassesCombined.filter(p => {
-      const s = globalSearch.toLowerCase();
-      const emp = employees.find(e => e.id === p.employeeId);
-      const loc = locations.find(l => l.id === p.locationId);
-      
-      const matchesSearch = !s || Boolean(
-        emp?.name?.toLowerCase().includes(s) ||
-        emp?.employeeId?.toLowerCase().includes(s) ||
-        emp?.qatarId?.toLowerCase().includes(s) ||
-        emp?.passportNumber?.toLowerCase().includes(s) ||
-        loc?.name?.toLowerCase().includes(s) ||
-        p.passNumber?.toLowerCase().includes(s) ||
-        p.id?.toLowerCase().includes(s) ||
-        p.applicationId?.toLowerCase().includes(s) ||
-        p.requestId?.toLowerCase().includes(s)
-      );
-
-      // History (expired/revoked/cancelled/rejected) is kept but only listed when the user
-      // specifically searches for it or explicitly picks that status filter.
-      const historyRequested = s.trim().length >= 2 || (filterStatus && filterStatus !== 'all' && filterStatus !== 'active');
-      if (isHistoryStatus(p.status) && !historyRequested) return false;
-
-      const matchesStatus = s.trim().length >= 2 && isHistoryStatus(p.status) && (!filterStatus || filterStatus === 'all')
-        ? true
-        : filterPassApplicationItem(p.status, filterStatus);
-
-      const matchesDate = isPassInDateRange(
-        {
-          startDate: p.startDate || p.issueDate || p.createdAt,
-          expiryDate: p.expiryDate
-        },
-        startDateFilter,
-        endDateFilter
-      );
-
-      return matchesSearch && matchesStatus && matchesDate;
-    });
-
-    return list.sort((a, b) => {
-      let valA: any = '';
-      let valB: any = '';
-      if (passSortField === 'employeeId') {
-        valA = employees.find(e => e.id === a.employeeId)?.employeeId || '';
-        valB = employees.find(e => e.id === b.employeeId)?.employeeId || '';
-      } else if (passSortField === 'name' || passSortField === 'employee') {
-        valA = employees.find(e => e.id === a.employeeId)?.name || '';
-        valB = employees.find(e => e.id === b.employeeId)?.name || '';
-      } else if (passSortField === 'jobTitle') {
-        valA = employees.find(e => e.id === a.employeeId)?.jobTitle || '';
-        valB = employees.find(e => e.id === b.employeeId)?.jobTitle || '';
-      } else if (passSortField === 'passInfo') {
-        valA = a.passNumber || a.id || '';
-        valB = b.passNumber || b.id || '';
-      } else if (passSortField === 'location') {
-        valA = locations.find(l => l.id === a.locationId)?.name || '';
-        valB = locations.find(l => l.id === b.locationId)?.name || '';
-      } else if (passSortField === 'validity') {
-        valA = a.expiryDate || a.validUntil || '';
-        valB = b.expiryDate || b.validUntil || '';
-      } else if (passSortField === 'status') {
-        valA = a.status || '';
-        valB = b.status || '';
-      }
-
-      if (valA < valB) return passSortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return passSortOrder === 'asc' ? 1 : -1;
-      return 0;
-    });
-  }, [allPassesCombined, globalSearch, employees, locations, filterStatus, passSortField, passSortOrder, startDateFilter, endDateFilter]);
+  const employeeFor = (p: ListedPass): Employee | undefined =>
+    employees.find(e => e.id === p.employeeId) ||
+    (p.employeeName ? ({ id: p.employeeId, name: p.employeeName, employeeId: p.employeeCode || '', jobTitle: p.employeeJobTitle || '', qatarId: p.employeeQid || '' } as unknown as Employee) : undefined);
+  const locationFor = (p: ListedPass): Location | undefined =>
+    locations.find(l => l.id === p.locationId) ||
+    (p.locationName ? ({ id: p.locationId, name: p.locationName, code: p.locationCode || '' } as unknown as Location) : undefined);
 
   const togglePassSelection = (passId: string) => {
     setSelectedPasses(prev => 
@@ -247,15 +194,13 @@ export function PassStatusManagementView({
         }
 
         for (const vId of virtualIds) {
-          const parts = vId.split('-');
-          if (parts.length >= 3) {
-            const appId = parts[1];
-            const empId = parts.slice(2).join('-');
-            await apiFetch(`/api/passApplications/${appId}/employee/${empId}`, {
-              method: 'PATCH',
-              body: JSON.stringify({ status, handoverBy: handoverBy || '' })
-            });
-          }
+          const row = passList.find(p => p.id === vId);
+          const appId = row?.requestId || row?.applicationId;
+          if (!row || !appId) continue;
+          await apiFetch(`/api/passApplications/${encodeURIComponent(appId)}/employee/${encodeURIComponent(row.employeeId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status, handoverBy: handoverBy || '' })
+          });
         }
 
         showToast(`Updated ${ids.length} passes to ${status}`);
@@ -263,6 +208,7 @@ export function PassStatusManagementView({
         setRevokeReason('');
         setIsRevokeModalOpen(false);
         setPendingStatus(null);
+        reloadList();
         onSuccess();
         logAction({
           type: 'bulk_updated',
@@ -280,7 +226,7 @@ export function PassStatusManagementView({
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      const prematurePass = allPassesCombined.find(p => {
+      const prematurePass = passList.find(p => {
         if (!ids.includes(p.id)) return false;
         if (!p.startDate) return false;
         const sTime = new Date(p.startDate).getTime();
@@ -302,7 +248,7 @@ export function PassStatusManagementView({
         if (p.type !== 'supplementary') return false;
         if (['revoked', 'cancelled', 'rejected', 'expired'].includes(p.status)) return false;
         return ids.some(id => {
-          const targetPass = allPassesCombined.find(tp => tp.id === id);
+          const targetPass = passList.find(tp => tp.id === id);
           if (!targetPass) return false;
           return (p.parentPassId && p.parentPassId === targetPass.id) || 
                  (targetPass.type === 'main' && (p.employeeId === targetPass.employeeId || p.parentPassId === (targetPass as any).id));
@@ -323,7 +269,7 @@ export function PassStatusManagementView({
       }
     }
 
-    const firstSelectedPass = allPassesCombined.find(p => ids.includes(p.id));
+    const firstSelectedPass = passList.find(p => ids.includes(p.id));
     const currentPassStatus = firstSelectedPass?.status || 'pending';
     const skipped = getSkippedWorkflowStages(currentPassStatus, status);
 
@@ -372,9 +318,14 @@ export function PassStatusManagementView({
     await executeUpdates('');
   };
 
-  const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
-
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
+    let exportRows: ListedPass[];
+    try {
+      exportRows = await fetchAllMatching();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load passes for export', 'error');
+      return;
+    }
     const workbook = XLSX.utils.book_new();
 
     const headers = [
@@ -393,28 +344,15 @@ export function PassStatusManagementView({
       "Status"
     ];
 
-    const rows = filteredPasses.map((pass, index) => {
-      const emp = employees.find(e => e.id === pass.employeeId);
-      const loc = locations.find(l => l.id === pass.locationId);
-      let codes: string[] = [];
-      if (Array.isArray(pass.accessCodes)) {
-        codes = pass.accessCodes;
-      } else if (typeof pass.accessCodes === 'string') {
-        try {
-          const parsed = JSON.parse(pass.accessCodes);
-          if (Array.isArray(parsed)) codes = parsed;
-          else if (parsed) codes = [String(parsed)];
-        } catch {
-          if (pass.accessCodes) codes = [pass.accessCodes];
-        }
-      }
+    const rows = exportRows.map((pass, index) => {
+      const codes = parseCodes(pass.accessCodes);
       return [
         (index + 1).toString(),
         pass.passNumber || pass.id || '—',
-        emp?.name || '—',
-        emp?.employeeId || emp?.qatarId || '—',
-        loc?.name || '—',
-        loc?.code || '—',
+        pass.employeeName || '—',
+        pass.employeeCode || pass.employeeQid || '—',
+        pass.locationName || '—',
+        pass.locationCode || '—',
         pass.type === 'main' ? 'Main' : 'Supplementary',
         codes.join(', ') || 'General Access',
         formatDate(pass.issueDate || pass.startDate),
@@ -427,7 +365,7 @@ export function PassStatusManagementView({
 
     const worksheet = XLSX.utils.aoa_to_sheet([
       ["MANAGED PASSES REPORT"],
-      [`Exported: ${new Date().toLocaleDateString()} | Total: ${filteredPasses.length} Records`],
+      [`Exported: ${new Date().toLocaleDateString()} | Total: ${exportRows.length} Records`],
       [],
       headers,
       ...rows
@@ -465,7 +403,7 @@ export function PassStatusManagementView({
           <div className="w-1.5 h-1.5 rounded-full bg-[#800020]"></div>
           <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Pass Status Management</p>
           <span className="px-2 py-0.5 bg-[#F3F4F6] text-[#6B7280] rounded-full text-[9px] font-bold">
-            {filteredPasses.length} Results
+            {totalMatching} Results
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -499,7 +437,7 @@ export function PassStatusManagementView({
           </button>
 
           <button 
-            onClick={() => setIsPrintModalOpen(true)}
+            onClick={openPrint}
             className="px-3 py-1.5 bg-white border border-[#E5E7EB] text-[#800020] hover:bg-rose-50 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
             title="Print or Export PDF"
           >
@@ -515,10 +453,10 @@ export function PassStatusManagementView({
             <div className="flex items-center gap-2">
               <input 
                 type="checkbox"
-                checked={selectedPasses.length === filteredPasses.length && filteredPasses.length > 0}
+                checked={selectedPasses.length === passList.length && passList.length > 0}
                 onChange={(e) => {
                   if (e.target.checked) {
-                    setSelectedPasses(filteredPasses.map(p => p.id));
+                    setSelectedPasses(passList.map(p => p.id));
                   } else {
                     setSelectedPasses([]);
                   }
@@ -580,25 +518,10 @@ export function PassStatusManagementView({
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F3F4F6] text-xs font-medium text-[#1E293B]">
-              {filteredPasses.map((pass, index) => {
-                const emp = employees.find(e => e.id === pass.employeeId);
-                const loc = locations.find(l => l.id === pass.locationId);
+              {passList.map((pass, index) => {
                 const isSelected = selectedPasses.includes(pass.id);
                 const resolved = resolvePersonnelStatus('', pass.status);
-
-                // Normalize access codes safely
-                let codes: string[] = [];
-                if (Array.isArray(pass.accessCodes)) {
-                  codes = pass.accessCodes;
-                } else if (typeof pass.accessCodes === 'string') {
-                  try {
-                    const parsed = JSON.parse(pass.accessCodes);
-                    if (Array.isArray(parsed)) codes = parsed;
-                    else if (parsed) codes = [String(parsed)];
-                  } catch {
-                    if (pass.accessCodes) codes = [pass.accessCodes];
-                  }
-                }
+                const codes = parseCodes(pass.accessCodes);
 
                 return (
                   <tr key={pass.id} className={cn("hover:bg-[#F9FAFB]/80 transition-all", isSelected && "bg-[#800020]/5")}>
@@ -611,15 +534,15 @@ export function PassStatusManagementView({
                       />
                     </td>
                     <td className="p-3 font-bold text-gray-500 font-mono text-[11px] text-center">{index + 1}</td>
-                    <td className="p-3 font-bold text-[#1E293B]">{emp?.name || 'Unknown'}</td>
-                    <td className="p-3 font-semibold text-gray-600">{emp?.employeeId || emp?.qatarId || '-'}</td>
+                    <td className="p-3 font-bold text-[#1E293B]">{pass.employeeName || 'Unknown'}</td>
+                    <td className="p-3 font-semibold text-gray-600">{pass.employeeCode || pass.employeeQid || '-'}</td>
                     <td className="p-3 font-bold text-[#800020]">{pass.passNumber || pass.id.toUpperCase()}</td>
                     <td className="p-3">
                       <div className="space-y-0.5">
-                        <div className="font-bold text-gray-900">{loc?.name || '-'}</div>
-                        {loc?.code && (
+                        <div className="font-bold text-gray-900">{pass.locationName || '-'}</div>
+                        {pass.locationCode && (
                           <span className="font-mono text-[10px] bg-[#800020]/10 text-[#800020] px-1.5 py-0.2 rounded border border-[#800020]/20 font-bold inline-block">
-                            {loc.code}
+                            {pass.locationCode}
                           </span>
                         )}
                       </div>
@@ -681,11 +604,24 @@ export function PassStatusManagementView({
             </tbody>
           </table>
 
-          {filteredPasses.length === 0 && (
+          {listError && (
+            <div className="py-6 text-center text-rose-600 text-xs font-semibold">{listError}</div>
+          )}
+          {!listLoading && !listError && passList.length === 0 && (
             <div className="py-16 text-center text-gray-400 text-xs font-semibold">
               No passes match the selected filters.
             </div>
           )}
+          <div ref={observerTarget} className="h-10 flex items-center justify-center">
+            {(listLoading || loadingMore) && (
+              <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Loading...</span>
+            )}
+            {!listLoading && !loadingMore && hasMore && (
+              <button onClick={() => loadMore()} className="text-[10px] font-bold text-[#800020] uppercase tracking-wider">
+                Load more ({passList.length} of {totalMatching})
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -700,8 +636,8 @@ export function PassStatusManagementView({
             </div>
             <PassDetails 
               pass={inspectingPass}
-              employee={employees.find(e => e.id === inspectingPass.employeeId)}
-              location={locations.find(l => l.id === inspectingPass.locationId)}
+              employee={employeeFor(inspectingPass)}
+              location={locationFor(inspectingPass)}
               accessCodes={accessCodes}
               onClose={() => setInspectingPass(null)}
               onUpdateStatus={(st) => {
@@ -734,13 +670,13 @@ export function PassStatusManagementView({
         isOpen={isPrintModalOpen} 
         onClose={() => setIsPrintModalOpen(false)} 
         title="Print Managed Passes / Export PDF"
-        documentTitle={`Managed_Passes_${filteredPasses.length}_Records`}
+        documentTitle={`Managed_Passes_${printRows.length}_Records`}
       >
         <div className="space-y-4">
           <div className="flex justify-between items-center border-b border-[#E5E7EB] pb-3">
             <div>
               <h2 className="text-base font-black text-[#800020] uppercase tracking-tight">Managed Passes Directory Report</h2>
-              <p className="text-[10px] text-[#6B7280] font-bold">Showing {filteredPasses.length} pass records</p>
+              <p className="text-[10px] text-[#6B7280] font-bold">Showing {printRows.length} pass records</p>
             </div>
             <button
               onClick={handleExportExcel}
@@ -766,29 +702,16 @@ export function PassStatusManagementView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E7EB]">
-                {filteredPasses.map((pass, idx) => {
-                  const emp = employees.find(e => e.id === pass.employeeId);
-                  const loc = locations.find(l => l.id === pass.locationId);
-                  let codes: string[] = [];
-                  if (Array.isArray(pass.accessCodes)) {
-                    codes = pass.accessCodes;
-                  } else if (typeof pass.accessCodes === 'string') {
-                    try {
-                      const parsed = JSON.parse(pass.accessCodes);
-                      if (Array.isArray(parsed)) codes = parsed;
-                      else if (parsed) codes = [String(parsed)];
-                    } catch {
-                      if (pass.accessCodes) codes = [pass.accessCodes];
-                    }
-                  }
+                {printRows.map((pass, idx) => {
+                  const codes = parseCodes(pass.accessCodes);
                   return (
                     <tr key={pass.id} className={cn("text-[9px]", idx % 2 === 0 ? "bg-white" : "bg-[#F9FAFB]")}>
                       <td className="p-2 text-center font-bold text-gray-500 border-r border-gray-200">{idx + 1}</td>
                       <td className="p-2 font-bold text-[#800020]">{pass.passNumber || pass.id.toUpperCase()}</td>
-                      <td className="p-2 font-bold text-gray-900">{emp?.name || 'Unknown'}</td>
-                      <td className="p-2 font-mono text-gray-700">{emp?.employeeId || emp?.qatarId || '—'}</td>
+                      <td className="p-2 font-bold text-gray-900">{pass.employeeName || 'Unknown'}</td>
+                      <td className="p-2 font-mono text-gray-700">{pass.employeeCode || pass.employeeQid || '—'}</td>
                       <td className="p-2 text-gray-700">
-                        {loc?.name || '—'} {loc?.code ? `(${loc.code})` : ''}
+                        {pass.locationName || '—'} {pass.locationCode ? `(${pass.locationCode})` : ''}
                       </td>
                       <td className="p-2 font-mono text-slate-700 font-bold">
                         {codes.join(', ') || 'General'}
