@@ -54,7 +54,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
       if (orgId) binds.orgId = orgId;
 
       // Per-pass rules (alias p)
-      const st = `LOWER(COALESCE(p.status, ''))`;
+      const st = `LOWER(TRIM(COALESCE(p.status, '')))`;
       const exp = ymd('p.expiryDate');
       const REPL = `(${st} IN ('replaced', 'superseded') OR LOWER(COALESCE(p.remarks, '')) LIKE '%replaced%')`;
       const EXPIRED = `(${st} = 'expired' OR (${exp} IS NOT NULL AND ${exp} < :today))`;

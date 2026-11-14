@@ -26,13 +26,17 @@ before(async () => {
     ('OLDEXP', 'Cat OldExpired', 'O-1', 'Driver', '${H}'),
     ('REPL', 'Dan Replaced', 'P-1', 'Fitter', '${H}'),
     ('NOPASS', 'Eve NoPass', 'N-1', 'Helper', '${H}'),
+    ('ODD', 'Fay OddDate', 'F-1', 'Painter', '${H}'),
     ('OTHER', 'Zed OtherOrg', 'X-1', 'Rigger', 'org-elsewhere')`);
   db.run(`INSERT INTO passes (id, employeeId, locationId, type, status, expiryDate, accessCodes, remarks, organizationId, createdAt, updatedAt) VALUES
     ('P_V', 'VALID', 'L1', 'main', 'active', '${plus(200)}', '["GATE-9"]', NULL, '${H}', '2026-01-01', '2026-01-01'),
     ('P_R', 'RECENT', 'L2', 'main', 'active', '${plus(-10)}', '[]', NULL, '${H}', '2026-01-01', '2026-01-01'),
     ('P_O', 'OLDEXP', 'L1', 'main', 'expired', '${plus(-200)}', '[]', NULL, '${H}', '2026-01-01', '2026-01-01'),
     ('P_P', 'REPL', 'L1', 'main', 'replaced', '${plus(100)}', '[]', NULL, '${H}', '2026-01-01', '2026-01-01'),
-    ('P_X', 'OTHER', 'L1', 'main', 'active', '${plus(100)}', '[]', NULL, 'org-elsewhere', '2026-01-01', '2026-01-01')`);
+    ('P_X', 'OTHER', 'L1', 'main', 'active', '${plus(100)}', '[]', NULL, 'org-elsewhere', '2026-01-01', '2026-01-01'),
+    ('P_D', 'ODD', 'L1', 'main', ' Active ', '1/5/2099', '[]', NULL, '${H}', '2026-01-01', '2026-01-01')`);
+  // One-digit day/month date, stored before dates were normalized: the migration converts it
+  db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-14-normalize-dates'`);
   db.save();
 
   srv = await startServer({ dbPath });
@@ -46,16 +50,16 @@ before(async () => {
 after(async () => { await srv?.stop(); });
 
 test('default view: valid passes, plus expiries within the window; own org only', async () => {
-  assert.deepEqual(await ids('page=1&status=active&expiredDays=30'), ['VALID', 'RECENT']);
-  assert.deepEqual(await ids('page=1&status=active&expiredDays=0'), ['VALID']);       // window off
-  assert.deepEqual(await ids('page=1&status=active&expiredDays=365'), ['VALID', 'RECENT', 'OLDEXP']);
+  assert.deepEqual(await ids('page=1&status=active&expiredDays=30'), ['VALID', 'RECENT', 'ODD']);
+  assert.deepEqual(await ids('page=1&status=active&expiredDays=0'), ['VALID', 'ODD']);       // window off
+  assert.deepEqual(await ids('page=1&status=active&expiredDays=365'), ['VALID', 'RECENT', 'OLDEXP', 'ODD']);
 });
 
 test('other status views', async () => {
   assert.deepEqual(await ids('page=1&status=expired'), ['RECENT', 'OLDEXP']);
   assert.deepEqual(await ids('page=1&status=replaced'), ['REPL']);
   assert.deepEqual(await ids('page=1&status=no_valid_pass'), ['RECENT', 'OLDEXP', 'REPL', 'NOPASS']);
-  assert.deepEqual(await ids('page=1&status=all_records'), ['VALID', 'RECENT', 'OLDEXP', 'REPL']);
+  assert.deepEqual(await ids('page=1&status=all_records'), ['VALID', 'RECENT', 'OLDEXP', 'REPL', 'ODD']);
 });
 
 test('search matches person fields, pass location and access codes; category filters', async () => {
@@ -66,11 +70,16 @@ test('search matches person fields, pass location and access codes; category fil
 });
 
 test('date range, sort, paging; each row carries its passes', async () => {
-  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL']);
-  assert.deepEqual(await ids('page=1&status=all_records&sort=name&order=desc'), ['REPL', 'OLDEXP', 'RECENT', 'VALID']);
+  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL', 'ODD']);
+  assert.deepEqual(await ids('page=1&status=all_records&sort=name&order=desc'), ['ODD', 'REPL', 'OLDEXP', 'RECENT', 'VALID']);
   const p2 = await admin.get('/api/matrix?page=2&pageSize=1&status=active&expiredDays=30');
-  assert.equal(p2.body.total, 2);
+  assert.equal(p2.body.total, 3);
   assert.deepEqual(p2.body.items.map(e => e.id), ['RECENT']);
   assert.deepEqual(p2.body.items[0].passes.map(p => p.id), ['P_R']);
   assert.deepEqual(p2.body.items[0].passes[0].accessCodes, []);
+});
+
+test('stored dates are converted to YYYY-MM-DD', async () => {
+  const r = await admin.get('/api/matrix?page=1&status=active&expiredDays=0&q=painter');
+  assert.equal(r.body.items[0].passes[0].expiryDate, '2099-05-01');
 });

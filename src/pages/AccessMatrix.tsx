@@ -573,6 +573,9 @@ export function AccessMatrix({
           <div className="w-1.5 h-1.5 rounded-full bg-[#800020]"></div>
           <div>
             <p className="text-[10px] font-bold text-[#6B7280] uppercase tracking-widest">Access Pass Matrix</p>
+            <p className="text-[10px] text-[#9CA3AF] font-semibold">
+              {listLoading ? 'Loading…' : `${totalMatching} personnel` + (filteredEmployees.length < totalMatching ? ` · showing ${filteredEmployees.length}, scroll for more` : '')}
+            </p>
           </div>
         </div>
         

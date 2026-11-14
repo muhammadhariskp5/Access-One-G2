@@ -10,6 +10,7 @@ import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees, loadPeople, savePeople } from "./src/server/requestLinks.ts";
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
+import { normalizeDate, normalizeStoredDates } from "./src/server/dates.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
 import { registerMatrixRoutes } from "./src/server/routes/matrix.ts";
@@ -634,51 +635,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       }
     };
 
-    const normalizeDateStr = (d: any): string | null => {
-      if (d === null || d === undefined || d === '') return null;
-      // Real calendar date check (rejects 31/02, month 13, ...)
-      const valid = (y: number, m: number, day: number) => {
-        const t = new Date(Date.UTC(y, m - 1, day));
-        return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === day;
-      };
-      // Excel stores dates as serial day numbers (1 = 1900-01-01, epoch 1899-12-30)
-      const serial = typeof d === 'number' ? d : (/^\d{5}(\.\d+)?$/.test(String(d).trim()) ? Number(String(d).trim()) : NaN);
-      if (Number.isFinite(serial) && serial > 20000 && serial < 80000) {
-        const t = new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000);
-        return t.toISOString().substring(0, 10);
-      }
-      if (d instanceof Date) {
-        if (isNaN(d.getTime())) return null;
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}`;
-      }
-      const str = String(d).trim();
-      if (!str) return null;
-      
-      const ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-      if (ymdMatch) {
-        if (!valid(+ymdMatch[1], +ymdMatch[2], +ymdMatch[3])) return null;
-        return `${ymdMatch[1]}-${ymdMatch[2].padStart(2, '0')}-${ymdMatch[3].padStart(2, '0')}`;
-      }
-
-      // Day-first (DD/MM/YYYY), the local convention
-      const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
-      if (dmyMatch) {
-        if (!valid(+dmyMatch[3], +dmyMatch[2], +dmyMatch[1])) return null;
-        return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
-      }
-
-      const parsed = new Date(str);
-      if (!isNaN(parsed.getTime())) {
-        const y = parsed.getFullYear();
-        const m = String(parsed.getMonth() + 1).padStart(2, '0');
-        const day = String(parsed.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}`;
-      }
-      return null;
-    };
+    const normalizeDateStr = normalizeDate; // src/server/dates.ts
 
     const validatePassExpiries = async (connection: any, employeeIds: string[], filteredCommonData: any, individualExpiries: any) => {
       const oracledb = (await import("oracledb")).default;
@@ -1491,6 +1448,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       }
 
       try {
+        // 1b. Dates in one stored format (YYYY-MM-DD), so date rules in SQL read them correctly
+        const datesFixed = await normalizeStoredDates(connection);
+        if (datesFixed > 0) logger.info(`[DailyJob] ${today}: ${datesFixed} stored dates converted to YYYY-MM-DD`);
+
         // 2. Expire live passes whose last valid day (business calendar) has passed.
         //    Terminal statuses are never overwritten, so the real end reason (revoked/replaced/cancelled) is kept.
         const expiredMain = await connection.execute(
@@ -1716,6 +1677,15 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       // applications, so browsers fetch only what changed instead of whole lists.
       id: '2026-11-13-sync-stamps',
       run: async (conn) => { await installSyncStamps(conn, getDbEngine()); }
+    },
+    {
+      // Pass and application dates in one stored format (YYYY-MM-DD): the Access Matrix and other
+      // lists compare them in SQL, which misread e.g. "5/1/2027" as already past
+      id: '2026-11-14-normalize-dates',
+      run: async (conn) => {
+        const n = await normalizeStoredDates(conn);
+        logger.info(`[Migration] ${n} stored dates converted to YYYY-MM-DD`);
+      }
     },
     {
       // The link table becomes the record of who is on each application: rebuild every
