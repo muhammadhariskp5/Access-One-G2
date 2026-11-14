@@ -13,12 +13,13 @@ import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
 import { pageClause } from "../employeeQuery.ts";
+import { enforceOneMainPassPerCategory } from "../mainPassRule.ts";
 import { respondDelta } from "../syncStamp.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
 
 // applications routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerApplicationRoutes(app: express.Express, ctx: RouteContext) {
-  const { oracledb, logAction, createNotification, notifyAdmins, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, getDbEngine } = ctx;
+  const { oracledb, logAction, createNotification, notifyAdmins, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, getDbEngine, closeApplicationsForEndedPasses } = ctx;
   app.get("/api/passApplications", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {
@@ -431,6 +432,11 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
          WHERE UPPER(requestId) = UPPER(:id) AND LOWER(status) IN ('active', 'collected', 'approved', 'accepted', 'issued', 'processing', 'rejected', 'cancelled')`,
         { updatedAt: now, id: applicationId }
       );
+    }
+
+    // Activating this application's passes must not leave anyone with two valid main passes in a category
+    if (['collected', 'completed', 'active'].includes(normStatus)) {
+      await enforceOneMainPassPerCategory(connection, employeeIds, ids => closeApplicationsForEndedPasses(connection, now, ids));
     }
 
     // Persist each person's updated status
@@ -1178,6 +1184,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
               organizationId: application.ORGANIZATIONID || 'org-habari'
             }
           );
+        }
+        if (['collected', 'completed'].includes(req.body.status)) {
+          await enforceOneMainPassPerCategory(connection, [req.params.employeeId],
+            ids => closeApplicationsForEndedPasses(connection, new Date().toISOString(), ids));
         }
       }
 

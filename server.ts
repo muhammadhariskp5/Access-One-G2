@@ -12,6 +12,7 @@ import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { normalizeDate, normalizeStoredDates, repairEmployeeDates } from "./src/server/dates.ts";
 import { relinkEmployeeReferences } from "./src/server/relink.ts";
+import { enforceOneMainPassPerCategory } from "./src/server/mainPassRule.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
 import { registerMatrixRoutes } from "./src/server/routes/matrix.ts";
@@ -1449,6 +1450,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       }
 
       try {
+        // 1a. Nobody holds two valid main passes in one category (safety net)
+        const mainRule = await enforceOneMainPassPerCategory(connection, null, ids => closeApplicationsForEndedPasses(connection, now, ids));
+        if (mainRule.replaced > 0) logger.warn(`[DailyJob] ${today}: ${mainRule.replaced} duplicate main passes replaced (${mainRule.groups} people/categories)`);
+
         // 1b. Dates in one stored format (YYYY-MM-DD), so date rules in SQL read them correctly
         const datesFixed = await normalizeStoredDates(connection);
         if (datesFixed > 0) logger.info(`[DailyJob] ${today}: ${datesFixed} stored dates converted to YYYY-MM-DD`);
@@ -1719,6 +1724,15 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       run: async (conn) => {
         const r = await repairEmployeeDates(conn);
         logger.info(`[Migration] employee dates repaired: ${r.fixed} converted, ${r.cleared} unreadable cleared`);
+      }
+    },
+    {
+      // One valid main pass per person per category: resolve any existing duplicates (the one valid
+      // longest is kept; supplementary passes move to it)
+      id: '2026-11-14-one-main-pass-per-category',
+      run: async (conn) => {
+        const r = await enforceOneMainPassPerCategory(conn, null, ids => closeApplicationsForEndedPasses(conn, new Date().toISOString(), ids));
+        logger.info(`[Migration] one main pass per category: ${r.replaced} duplicate main passes replaced (${r.groups} people/categories)`);
       }
     }
   ];

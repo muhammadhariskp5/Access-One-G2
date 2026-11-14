@@ -898,7 +898,8 @@ export function PassSubmissionForm({
       if (locId && p.locationId === locId) return true;
       return false;
     });
-    // Several valid ones: the one that lasts longest
+    // The server keeps at most one valid main pass per person per category; if two ever showed
+    // here (e.g. before a refresh), take the one valid longest
     return candidates.sort((a, b) => String(parseToYMD(b.expiryDate) || '').localeCompare(String(parseToYMD(a.expiryDate) || '')))[0];
   };
 
