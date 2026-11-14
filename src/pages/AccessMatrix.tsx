@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { motion } from 'motion/react';
 import { Shield, Filter, ChevronRight, CheckCircle2, XCircle, Clock, ArrowUpDown, ArrowUp, ArrowDown, Calendar, Printer, Download, FileSpreadsheet, Columns, Layers, SlidersHorizontal } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -10,12 +10,14 @@ import { DateRangeFilter } from '../components/common/DateRangeFilter';
 import { ColumnDefinition } from '../components/common/ColumnCustomizerModal';
 import { MatrixCustomizerModal } from '../components/matrix/MatrixCustomizerModal';
 import { useUserColumnPreferences } from '../hooks/useUserColumnPreferences';
+import { usePagedList } from '../hooks/usePagedList';
+
+// One matrix row from the server: the person and all their live passes
+type MatrixRow = Employee & { passes: Pass[] };
 
 interface AccessMatrixProps {
   currentUser?: UserProfile | null;
   showToast?: (message: string, type?: 'success' | 'error') => void;
-  employees?: Employee[];
-  passes?: Pass[];
   locations?: Location[];
   categories?: Category[];
   accessCodes?: AccessCode[];
@@ -98,9 +100,7 @@ const isPassValidAndActive = (p: Pass) => {
 export function AccessMatrix({ 
   currentUser,
   showToast,
-  employees = [], 
-  passes = [], 
-  locations = [], 
+  locations = [],  
   categories = [], 
   accessCodes = [],
   globalSearch = '' 
@@ -403,7 +403,17 @@ export function AccessMatrix({
     }
   };
 
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
+    let allRows: MatrixRow[];
+    try {
+      allRows = await fetchAllMatching();
+    } catch (err: any) {
+      showToast?.(err.message || 'Failed to load the matrix for export', 'error');
+      return;
+    }
+    // Every matching row (not just the pages loaded on screen)
+    const filteredEmployees: Employee[] = allRows;
+    const passes: Pass[] = allRows.flatMap(r => r.passes || []);
     const workbook = XLSX.utils.book_new();
 
     // Prepare headers
@@ -509,96 +519,52 @@ export function AccessMatrix({
     XLSX.writeFile(workbook, `Access_Pass_Matrix_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
-  const filteredEmployees = useMemo(() => {
-    const s = (globalSearch || '').toLowerCase().trim();
-    
-    return employees.filter(emp => {
-      // Get all passes for this employee
-      const empAllPasses = passes.filter(p => isPassForEmployee(p, emp) && isPassInDateRange(p, startDateFilter, endDateFilter));
-      const validActivePasses = empAllPasses.filter(p => isPassValidAndActive(p));
-      const expiredPasses = empAllPasses.filter(p => isPassExpired(p) && !isPassReplaced(p) && (p.status || '').toLowerCase() !== 'rejected' && (p.status || '').toLowerCase() !== 'cancelled');
-      const replacedPasses = empAllPasses.filter(p => isPassReplaced(p));
-      const recentExpiredPasses = showsRecentExpired ? empAllPasses.filter(p => isRecentlyExpired(p, expiredWindowDays)) : [];
+  // Who appears (status, recent-expiry window, dates, search, category) and in which order is
+  // decided by the server (GET /api/matrix), a page at a time; each row carries that person's
+  // passes, from which the cells are built exactly as before.
+  const {
+    items: matrixRows,
+    total: totalMatching,
+    loading: listLoading,
+    loadingMore,
+    error: listError,
+    hasMore,
+    loadMore,
+    fetchAll: fetchAllMatching,
+  } = usePagedList<MatrixRow>('/api/matrix', {
+    q: globalSearch,
+    status: filterStatus,
+    category: filterCategory,
+    from: parseToYMD(startDateFilter),
+    to: parseToYMD(endDateFilter),
+    sort: sortField,
+    order: sortOrder,
+    expiredDays: expiredWindowDays,
+  }, ['employees', 'passes', 'passApplications', 'locations']);
+  const filteredEmployees: Employee[] = matrixRows;
+  const passes: Pass[] = useMemo(() => matrixRows.flatMap(r => r.passes || []), [matrixRows]);
 
-      // 1. Status Filter Validation
-      const normFilter = filterStatus.toLowerCase();
-      if (normFilter === 'active' || normFilter === 'all') {
-        // Must have at least ONE valid, active, unexpired pass, or one that expired recently
-        // (within the user's chosen window) and still needs re-applying
-        if (validActivePasses.length === 0 && recentExpiredPasses.length === 0) return false;
-      } else if (normFilter === 'expired') {
-        // Must have at least one expired pass
-        if (expiredPasses.length === 0) return false;
-      } else if (normFilter === 'replaced') {
-        // Must have replaced passes
-        if (replacedPasses.length === 0) return false;
-      } else if (normFilter === 'no_valid_pass') {
-        // Personnel who do NOT have any valid active pass
-        if (validActivePasses.length > 0) return false;
-      } else if (normFilter === 'all_records') {
-        // Any employee with at least one pass record
-        if (empAllPasses.length === 0) return false;
-      }
+  const observerTarget = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting && hasMore) loadMore(); },
+      { threshold: 1.0 }
+    );
+    if (observerTarget.current) observer.observe(observerTarget.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadMore]);
 
-      // Relevant passes for search and category filtering
-      const relevantPasses = normFilter === 'expired' 
-        ? expiredPasses 
-        : (normFilter === 'replaced' ? replacedPasses : (validActivePasses.length + recentExpiredPasses.length > 0 ? [...validActivePasses, ...recentExpiredPasses] : empAllPasses));
-
-      // 2. Search matching
-      let matchesSearch = true;
-      if (s) {
-        const passLocations = relevantPasses.map(p => locations.find(l => l.id === p.locationId)?.name?.toLowerCase() || '');
-        const passCodes = relevantPasses.flatMap(p => p.accessCodes || []).map(c => c.toLowerCase());
-
-        matchesSearch = Boolean(
-          emp.name?.toLowerCase().includes(s) ||
-          emp.employeeId?.toLowerCase().includes(s) ||
-          emp.jobTitle?.toLowerCase().includes(s) ||
-          emp.qatarId?.toLowerCase().includes(s) ||
-          emp.qidVisaNumber?.toLowerCase().includes(s) ||
-          emp.department?.toLowerCase().includes(s) ||
-          emp.division?.toLowerCase().includes(s) ||
-          passLocations.some(loc => loc.includes(s)) ||
-          passCodes.some(code => code.includes(s))
-        );
-      }
-
-      if (!matchesSearch) return false;
-
-      // 3. Category matching
-      if (filterCategory !== 'all') {
-        const catLocIds = locations.filter(l => String(l.categoryId) === String(filterCategory)).map(l => l.id);
-        const hasPassInCat = relevantPasses.some(p => catLocIds.includes(p.locationId));
-        if (!hasPassInCat) return false;
-      }
-
-      return true;
-    }).sort((a, b) => {
-      let valA: any = '';
-      let valB: any = '';
-      if (columnConfigs[sortField]) {
-        valA = columnConfigs[sortField].getSortVal(a);
-        valB = columnConfigs[sortField].getSortVal(b);
-      } else if (sortField === 'name') {
-        valA = a.name || '';
-        valB = b.name || '';
-      } else if (sortField === 'code') {
-        valA = a.employeeId || '';
-        valB = b.employeeId || '';
-      } else if (sortField === 'jobTitle') {
-        valA = a.jobTitle || '';
-        valB = b.jobTitle || '';
-      } else if (sortField === 'status') {
-        valA = a.status || '';
-        valB = b.status || '';
-      }
-
-      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
-      return 0;
-    });
-  }, [employees, passes, locations, globalSearch, filterStatus, filterCategory, sortField, sortOrder, startDateFilter, endDateFilter, columnConfigs, showsRecentExpired, expiredWindowDays]);
+  // Print uses every matching row, fetched when opened
+  const [printRows, setPrintRows] = useState<MatrixRow[]>([]);
+  const printPasses: Pass[] = useMemo(() => printRows.flatMap(r => r.passes || []), [printRows]);
+  const openPrint = async () => {
+    try {
+      setPrintRows(await fetchAllMatching());
+      setIsPrintModalOpen(true);
+    } catch (err: any) {
+      showToast?.(err.message || 'Failed to load the matrix for printing', 'error');
+    }
+  };
 
   return (
     <div className="space-y-4 flex-1 flex flex-col w-full min-h-0 h-[calc(100vh-90px)]">
@@ -682,7 +648,7 @@ export function AccessMatrix({
           </button>
 
           <button
-            onClick={() => setIsPrintModalOpen(true)}
+            onClick={openPrint}
             className="px-3 py-1.5 bg-white border border-[#E5E7EB] text-[#800020] hover:bg-rose-50 hover:border-rose-200 rounded-xl font-bold text-[10px] uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
             title="Print or Export current Access Matrix to PDF"
           >
@@ -801,7 +767,7 @@ export function AccessMatrix({
               {filteredEmployees.length === 0 ? (
                 <tr>
                   <td colSpan={100} className="p-12 text-center text-gray-500 font-semibold text-xs">
-                    No personnel records with passes found matching the selected filters.
+                    {listLoading ? 'Loading…' : listError ? listError : 'No personnel records with passes found matching the selected filters.'}
                   </td>
                 </tr>
               ) : (
@@ -916,6 +882,16 @@ export function AccessMatrix({
             )}
             </tbody>
           </table>
+          <div ref={observerTarget} className="h-10 flex items-center justify-center">
+            {loadingMore && (
+              <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Loading...</span>
+            )}
+            {!listLoading && !loadingMore && hasMore && (
+              <button onClick={() => loadMore()} className="text-[10px] font-bold text-[#800020] uppercase tracking-wider cursor-pointer">
+                Load more ({filteredEmployees.length} of {totalMatching})
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -934,7 +910,7 @@ export function AccessMatrix({
               <p className="text-[10px] text-gray-500 font-medium">Generated on {new Date().toLocaleString()}</p>
             </div>
             <div className="text-right text-[10px] text-gray-600">
-              <p><span className="font-bold">Total Personnel:</span> {filteredEmployees.length}</p>
+              <p><span className="font-bold">Total Personnel:</span> {printRows.length}</p>
               {(startDateFilter || endDateFilter) && (
                 <p><span className="font-bold">Date Range:</span> {startDateFilter || 'Start'} to {endDateFilter || 'End'}</p>
               )}
@@ -1014,15 +990,15 @@ export function AccessMatrix({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {filteredEmployees.length === 0 ? (
+                {printRows.length === 0 ? (
                   <tr>
                     <td colSpan={100} className="p-8 text-center text-gray-500 font-semibold text-xs">
                       No personnel records with passes found matching the selected filters.
                     </td>
                   </tr>
                 ) : (
-                  filteredEmployees.map((emp, index) => {
-                    const empPasses = passes.filter(p => isPassForEmployee(p, emp) && isPassInDateRange(p, startDateFilter, endDateFilter));
+                  printRows.map((emp, index) => {
+                    const empPasses = printPasses.filter(p => isPassForEmployee(p, emp) && isPassInDateRange(p, startDateFilter, endDateFilter));
                     const validActivePasses = empPasses.filter(p => isPassValidAndActive(p));
 
                   return (

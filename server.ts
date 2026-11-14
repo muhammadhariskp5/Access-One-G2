@@ -12,6 +12,7 @@ import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
+import { registerMatrixRoutes } from "./src/server/routes/matrix.ts";
 import { enforceForeignKeys, ensureSystemUser, repairCaseMismatches, clearDanglingMainPassLinks } from "./src/server/integrity.ts";
 import { newId, newRef, nextSequenceValue } from "./src/server/ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "./src/server/session.ts";
@@ -1309,6 +1310,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
   registerActivityRoutes(app, routeCtx);
   registerDashboardRoutes(app, routeCtx);
   registerScopeRoutes(app, routeCtx);
+  registerMatrixRoutes(app, routeCtx);
   registerStructureRoutes(app, routeCtx);
   registerUserRoutes(app, routeCtx);
   registerPlatformRoutes(app, routeCtx);

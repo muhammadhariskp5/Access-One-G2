@@ -52,11 +52,10 @@ type BigList = 'employees' | 'passes' | 'passApplications';
 const BIG_LISTS: BigList[] = ['employees', 'passes', 'passApplications'];
 const BIG_LIST_URL: Record<BigList, string> = { employees: '/api/employees', passes: '/api/passes', passApplications: '/api/passApplications' };
 function listsForPath(path: string): BigList[] {
-  if (['/', '/employees', '/resources', '/settings', '/audit', '/notifications'].includes(path)) return [];
+  if (['/', '/employees', '/matrix', '/resources', '/settings', '/audit', '/notifications'].includes(path)) return [];
   if (path.startsWith('/employees/')) return [];
   // Applications, Application detail and Pass Status use server queries / scoped records
   if (path.startsWith('/applications') || path === '/status-management') return [];
-  if (path === '/matrix') return ['employees', 'passes'];
   return BIG_LISTS;
 }
 
@@ -978,8 +977,6 @@ export default function App() {
                 <AccessMatrix 
                   currentUser={user}
                   showToast={showToast}
-                  employees={employees}
-                  passes={passes}
                   locations={locations}
                   categories={categories}
                   accessCodes={accessCodes}
