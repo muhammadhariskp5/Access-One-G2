@@ -880,11 +880,16 @@ export function PassSubmissionForm({
 
     const targetCatId = catId || (locId ? locations.find(l => l.id === locId)?.categoryId : undefined);
 
-    return passes.find(p => {
+    // Any valid main pass can carry a supplementary - the 45-day renewal window is irrelevant here
+    // (it only lets a renewal Main application through). Valid = not ended by status or by date.
+    const today = parseToYMD(new Date().toISOString()) || '';
+    const candidates = passes.filter(p => {
       if (!possibleEmpIds.has(p.employeeId)) return false;
       if (isPassFromCurrentApp(p)) return false;
       if (p.type !== 'main') return false;
-      if (['expired', 'revoked', 'cancelled', 'replaced', 'rejected'].includes(p.status)) return false;
+      if (['expired', 'revoked', 'cancelled', 'replaced', 'rejected'].includes(String(p.status || '').toLowerCase())) return false;
+      const exp = parseToYMD(p.expiryDate);
+      if (exp && exp < today) return false;
       const passLoc = locations.find(l => l.id === p.locationId);
       const passCatId = (p as any).categoryId || passLoc?.categoryId;
       if (targetCatId && passCatId) {
@@ -893,6 +898,8 @@ export function PassSubmissionForm({
       if (locId && p.locationId === locId) return true;
       return false;
     });
+    // Several valid ones: the one that lasts longest
+    return candidates.sort((a, b) => String(parseToYMD(b.expiryDate) || '').localeCompare(String(parseToYMD(a.expiryDate) || '')))[0];
   };
 
   // Find expiring Main pass within 45-day early renewal window
@@ -1043,7 +1050,7 @@ export function PassSubmissionForm({
         selectedLocs.forEach(locId => {
           const sel = data.selections[locId];
           data.employeeIds.forEach(empId => {
-            const activeMain = findActiveMainPass(empId, locId, data.categoryId);
+            const activeMain = findParentMainPassForSupplementary(empId, locId, data.categoryId);
             const passPayload = {
               employeeId: empId,
               requestId: targetAppId,
@@ -1107,7 +1114,7 @@ export function PassSubmissionForm({
         selectedLocs.forEach(locId => {
           const sel = data.selections[locId];
           data.employeeIds.forEach(empId => {
-            const activeMain = findActiveMainPass(empId, locId, data.categoryId);
+            const activeMain = findParentMainPassForSupplementary(empId, locId, data.categoryId);
             const passPayload = {
               employeeId: empId,
               locationId: locId,
@@ -1158,7 +1165,7 @@ export function PassSubmissionForm({
           locationId: selectedLocIds[0] || data.locationId,
           categoryId: data.categoryId,
           type: data.type,
-          parentPassId: data.type === 'supplementary' ? findActiveMainPass(data.employeeIds[0], selectedLocIds[0] || data.locationId, data.categoryId)?.id : undefined,
+          parentPassId: data.type === 'supplementary' ? findParentMainPassForSupplementary(data.employeeIds[0], selectedLocIds[0] || data.locationId, data.categoryId)?.id : undefined,
           accessCodes: data.selections[selectedLocIds[0]]?.accessCodes || data.accessCodes,
           status: 'pending',
           authorityAppNumber: data.authorityAppNumber,
@@ -1419,7 +1426,28 @@ export function PassSubmissionForm({
 
         if (data.type === 'supplementary') {
           const hasLinkedParent = !!(data.parentPassId || initialData?.parentPassId || sourceApp?.parentPassId);
-          if (!activeMainPass && !activeMainApp && !hasLinkedParent) {
+          const parentMain = findParentMainPassForSupplementary(empId, targetLocId, data.categoryId);
+          // A supplementary pass cannot outlast the main pass it hangs off
+          const parentEnd = parseToYMD(parentMain?.expiryDate);
+          const suppEnd = parseToYMD(data.individualExpiries?.[empId] || data.expiryDate);
+          if (parentMain && parentEnd && suppEnd && suppEnd > parentEnd) {
+            setErrorGuidance({
+              title: 'Supplementary Pass Ends After Its Main Pass',
+              category: 'policy',
+              problem: `Personnel "${empName}": the supplementary pass would end ${formatDate(suppEnd)}, but their Main Pass (${parentMain.passNumber || parentMain.id}) ends ${formatDate(parentEnd)}.`,
+              explanation: 'A supplementary pass is valid only while its main pass is valid, so its expiry can be at most the main pass expiry.',
+              suggestedAction: 'Click below to set the supplementary expiry for this person to the main pass expiry.',
+              actionButton: {
+                label: `Set expiry to ${formatDate(parentEnd)} & Retry`,
+                onClick: () => {
+                  setData(prev => ({ ...prev, individualExpiries: { ...prev.individualExpiries, [empId]: parentEnd } }));
+                  setErrorGuidance(null);
+                }
+              }
+            });
+            return;
+          }
+          if (!parentMain && !activeMainApp && !hasLinkedParent) {
             setErrorGuidance({
               title: 'Main Pass Required for Supplementary Pass',
               category: 'policy',
