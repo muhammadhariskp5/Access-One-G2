@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
+import { syncRequestEmployees, findMissingEmployees, attachPeople } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
@@ -50,7 +50,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
             `SELECT ${APPLICATION_LIST_COLUMNS} FROM ${from} WHERE ${where}${applicationTabClause(f)} ${applicationOrderBy(f)} ${pageClause(engine, offset, limit)}`,
             binds, opts
           );
-          items = (rowsRes.rows || []).map((r: any) => mapApplicationRow(r, toCamelCase));
+          items = await attachPeople(connection, (rowsRes.rows || []).map((r: any) => mapApplicationRow(r, toCamelCase)));
         }
         return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit, activeCount, archivedCount });
       }
@@ -65,7 +65,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         individualStartDates: JSON.parse(r.INDIVIDUALSTARTDATES || '{}')
       });
       // Delta refresh (?since=cursor): only rows changed since the browser's last fetch
-      if (await respondDelta(req, res, connection, 'passRequests', orgId || null, mapRequest)) return;
+      // People on each application come from the link table (attachPeople)
+      if (await respondDelta(req, res, connection, 'passRequests', orgId || null, mapRequest, items => attachPeople(connection, items))) return;
 
       let sql = `SELECT * FROM passRequests WHERE deletedAt IS NULL`;
       const binds: any = {};
@@ -77,7 +78,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
 
       const result = await connection.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT });
 
-      const requests = result.rows?.map(mapRequest) || [];
+      const requests = await attachPeople(connection, result.rows?.map(mapRequest) || []);
 
       res.json(requests);
     } catch (err) {

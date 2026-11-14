@@ -1713,6 +1713,18 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       // applications, so browsers fetch only what changed instead of whole lists.
       id: '2026-11-13-sync-stamps',
       run: async (conn) => { await installSyncStamps(conn, getDbEngine()); }
+    },
+    {
+      // The link table becomes the record of who is on each application: rebuild every
+      // application's rows with each person's own status (NULL = follows the application),
+      // dates and list order.
+      id: '2026-11-14-link-table-people',
+      run: async (conn) => {
+        const res = await conn.execute(`SELECT id FROM passRequests`, {}, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        for (const r of (res.rows || []) as any[]) {
+          await syncRequestEmployees(conn, r.ID || r.id);
+        }
+      }
     }
   ];
 

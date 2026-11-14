@@ -103,6 +103,7 @@ export function sinceFromCursor(v: unknown): string | null {
 export async function respondDelta(
   req: any, res: any, connection: any, table: string, orgId: string | null,
   mapRow: (row: any) => any,
+  finish?: (items: any[]) => Promise<unknown>,
 ): Promise<boolean> {
   if (req.query.since === undefined) {
     if (ready) res.setHeader('X-Sync-Cursor', syncCursor());
@@ -123,6 +124,7 @@ export async function respondDelta(
     if ((r.DELETEDAT ?? r.deletedAt) != null) removed.push(String(r.ID ?? r.id));
     else items.push(mapRow(r));
   }
+  if (finish) await finish(items);
   res.json({ items, removed, cursor });
   return true;
 }

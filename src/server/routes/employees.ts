@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { cancelEmployeesOnApplications, syncRequestEmployees } from "../requestLinks.ts";
+import { cancelEmployeesOnApplications, syncRequestEmployees, attachPeople } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
@@ -188,6 +188,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         individualExpiries: JSON.parse(r.INDIVIDUALEXPIRIES || '{}'),
         individualStartDates: JSON.parse(r.INDIVIDUALSTARTDATES || '{}')
       })) || [];
+      await attachPeople(connection, requests);   // people from the link table
 
       // 3. Fetch linked passes
       const passesResult = await connection.execute(

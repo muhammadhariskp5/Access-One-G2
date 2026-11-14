@@ -1,75 +1,135 @@
 import crypto from 'crypto';
 
-// --- passRequestEmployees mapping-table sync ---
-// The employee detail page and search read this table; it must always mirror
-// passRequests.employeeIds / employeeStatuses. Called inside the same transaction as the write
-// that changed the application, so both commit (or roll back) together.
-// Incremental: inserts people added, deletes people removed, updates changed statuses —
-// unchanged rows are left alone.
-export async function syncRequestEmployees(connection: any, requestId: string): Promise<void> {
+// --- People on an application: the passRequestEmployees link table ---
+// One row per person on an application: their own status (NULL = follows the application's
+// status), own expiry and start date (NULL = the application's dates apply) and their place in
+// the list. API responses build employeeIds / employeeStatuses / individualExpiries /
+// individualStartDates from these rows (readPeople), so the response shape is unchanged.
+
+export interface AppPeople {
+  employeeIds: string[];
+  employeeStatuses: Record<string, string>;
+  individualExpiries: Record<string, string>;
+  individualStartDates: Record<string, string>;
+}
+
+const parseJson = <T,>(v: unknown, fallback: T): T => {
+  if (v === null || v === undefined || v === '') return fallback;
+  try { return (JSON.parse(String(v)) ?? fallback) as T; } catch { return fallback; }
+};
+const str50 = (v: unknown): string | null => (v === null || v === undefined || v === '' ? null : String(v).slice(0, 50));
+
+// Make the link rows of one application match `people` (incremental: inserts people added,
+// deletes people removed, updates changed rows). Runs inside the caller's transaction.
+export async function writePeople(connection: any, requestId: string, people: AppPeople): Promise<void> {
   const oracledb = (await import("oracledb")).default;
-  const appRes = await connection.execute(
-    `SELECT id, status, employeeIds, employeeStatuses, individualExpiries FROM passRequests WHERE UPPER(id) = UPPER(:id)`,
-    [requestId],
-    { outFormat: oracledb.OUT_FORMAT_OBJECT }
-  );
-  const app: any = appRes.rows?.[0];
-  if (!app) return;
-  const realId = app.ID || app.id;
-  let empIds: string[] = [];
-  let statuses: Record<string, string> = {};
-  try { empIds = JSON.parse(app.EMPLOYEEIDS || app.employeeIds || '[]') || []; } catch { empIds = []; }
-  try { statuses = JSON.parse(app.EMPLOYEESTATUSES || app.employeeStatuses || '{}') || {}; } catch { statuses = {}; }
-  let expiries: Record<string, string> = {};
-  try { expiries = JSON.parse(app.INDIVIDUALEXPIRIES || app.individualExpiries || '{}') || {}; } catch { expiries = {}; }
-  const appStatus = app.STATUS || app.status || 'pending';
-
-  // Desired state: one row per employee on the application, with that person's status and
-  // own expiry date (null = the application's end date applies)
-  const desired = new Map<string, { status: string; expiry: string | null }>();
-  for (const empId of empIds) {
-    if (empId) desired.set(String(empId), {
-      status: String(statuses[empId] || appStatus),
-      expiry: expiries[empId] ? String(expiries[empId]).slice(0, 50) : null,
+  const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+  type Want = { status: string | null; expiry: string | null; start: string | null; order: number };
+  const desired = new Map<string, Want>();
+  people.employeeIds.forEach((empId, i) => {
+    const id = String(empId || '');
+    if (!id || desired.has(id)) return;
+    desired.set(id, {
+      status: str50(people.employeeStatuses?.[id]),
+      expiry: str50(people.individualExpiries?.[id]),
+      start: str50(people.individualStartDates?.[id]),
+      order: i,
     });
-  }
+  });
 
-  // Current state
-  const curRes = await connection.execute(
-    `SELECT id, employeeId, status, expiryDate FROM passRequestEmployees WHERE requestId = :id`,
-    [realId],
-    { outFormat: oracledb.OUT_FORMAT_OBJECT }
+  const cur = await connection.execute(
+    `SELECT id, employeeId, status, expiryDate, startDate, sortOrder FROM passRequestEmployees WHERE requestId = :id`,
+    [requestId], opts
   );
   const seen = new Set<string>();
-  for (const row of (curRes.rows || []) as any[]) {
-    const rowId = row.ID || row.id;
-    const empId = String(row.EMPLOYEEID || row.employeeId || '');
-    const status = String(row.STATUS || row.status || '');
-    const expiry = (row.EXPIRYDATE ?? row.expiryDate) || null;
+  for (const row of (cur.rows || []) as any[]) {
+    const g = (k: string) => row[k.toUpperCase()] ?? row[k] ?? null;
+    const empId = String(g('employeeId') || '');
     const want = desired.get(empId);
     if (!want || seen.has(empId)) {
       // Person removed from the application (or a duplicate row)
-      await connection.execute(`DELETE FROM passRequestEmployees WHERE id = :id`, [rowId]);
+      await connection.execute(`DELETE FROM passRequestEmployees WHERE id = :id`, [g('id')]);
       continue;
     }
     seen.add(empId);
-    if (status !== want.status || expiry !== want.expiry) {
+    const same = str50(g('status')) === want.status && str50(g('expiryDate')) === want.expiry &&
+      str50(g('startDate')) === want.start && Number(g('sortOrder')) === want.order && g('sortOrder') !== null;
+    if (!same) {
       await connection.execute(
-        `UPDATE passRequestEmployees SET status = :status, expiryDate = :expiryDate WHERE id = :id`,
-        { status: want.status, expiryDate: want.expiry, id: rowId }
+        `UPDATE passRequestEmployees SET status = :status, expiryDate = :expiryDate, startDate = :startDate, sortOrder = :sortOrder WHERE id = :id`,
+        { status: want.status, expiryDate: want.expiry, startDate: want.start, sortOrder: want.order, id: g('id') }
       );
     }
   }
   for (const [empId, want] of desired) {
     if (seen.has(empId)) continue;
-    // Insert only when the employee row exists: a stale ID in an old application's JSON must not
-    // create a dangling link (or, with foreign keys enforced, make every edit of it fail).
+    // Only for an existing employee: a stale ID must not create a dangling link (or, with foreign
+    // keys enforced, make every edit of the application fail).
     await connection.execute(
-      `INSERT INTO passRequestEmployees (id, requestId, employeeId, status, expiryDate)
-       SELECT :id, :requestId, e.id, :status, :expiryDate FROM employees e WHERE e.id = :employeeId`,
-      { id: crypto.randomUUID(), requestId: realId, employeeId: empId, status: want.status, expiryDate: want.expiry }
+      `INSERT INTO passRequestEmployees (id, requestId, employeeId, status, expiryDate, startDate, sortOrder)
+       SELECT :id, :requestId, e.id, :status, :expiryDate, :startDate, :sortOrder FROM employees e WHERE e.id = :employeeId`,
+      { id: crypto.randomUUID(), requestId, employeeId: empId, status: want.status, expiryDate: want.expiry, startDate: want.start, sortOrder: want.order }
     );
   }
+}
+
+// The people of these applications, from the link table (in list order).
+export async function readPeople(connection: any, requestIds: string[]): Promise<Map<string, AppPeople>> {
+  const out = new Map<string, AppPeople>();
+  const ids = Array.from(new Set(requestIds.map(String).filter(Boolean)));
+  for (const id of ids) out.set(id, { employeeIds: [], employeeStatuses: {}, individualExpiries: {}, individualStartDates: {} });
+  if (ids.length === 0) return out;
+  const oracledb = (await import("oracledb")).default;
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const binds: Record<string, string> = {};
+    chunk.forEach((id, j) => { binds[`r${j}`] = id; });
+    const res = await connection.execute(
+      `SELECT requestId, employeeId, status, expiryDate, startDate FROM passRequestEmployees
+        WHERE requestId IN (${chunk.map((_, j) => `:r${j}`).join(', ')})
+        ORDER BY requestId, sortOrder, employeeId`,
+      binds, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    for (const row of (res.rows || []) as any[]) {
+      const g = (k: string) => row[k.toUpperCase()] ?? row[k] ?? null;
+      const p = out.get(String(g('requestId')));
+      if (!p) continue;
+      const emp = String(g('employeeId'));
+      p.employeeIds.push(emp);
+      if (g('status')) p.employeeStatuses[emp] = String(g('status'));
+      if (g('expiryDate')) p.individualExpiries[emp] = String(g('expiryDate'));
+      if (g('startDate')) p.individualStartDates[emp] = String(g('startDate'));
+    }
+  }
+  return out;
+}
+
+// Replace the people fields of mapped applications (objects with an `id`) with the link table's.
+export async function attachPeople<T extends { id: string }>(connection: any, apps: T[]): Promise<T[]> {
+  if (apps.length === 0) return apps;
+  const people = await readPeople(connection, apps.map(a => a.id));
+  for (const a of apps) Object.assign(a, people.get(String(a.id)));
+  return apps;
+}
+
+// Legacy entry point for writers that still keep the people in passRequests' JSON columns: copy
+// them into the link table. Called inside the same transaction as the write.
+export async function syncRequestEmployees(connection: any, requestId: string): Promise<void> {
+  const oracledb = (await import("oracledb")).default;
+  const appRes = await connection.execute(
+    `SELECT id, employeeIds, employeeStatuses, individualExpiries, individualStartDates FROM passRequests WHERE UPPER(id) = UPPER(:id)`,
+    [requestId],
+    { outFormat: oracledb.OUT_FORMAT_OBJECT }
+  );
+  const app: any = appRes.rows?.[0];
+  if (!app) return;
+  const g = (k: string) => app[k.toUpperCase()] ?? app[k] ?? null;
+  await writePeople(connection, String(g('id')), {
+    employeeIds: parseJson<string[]>(g('employeeIds'), []),
+    employeeStatuses: parseJson<Record<string, string>>(g('employeeStatuses'), {}),
+    individualExpiries: parseJson<Record<string, string>>(g('individualExpiries'), {}),
+    individualStartDates: parseJson<Record<string, string>>(g('individualStartDates'), {}),
+  });
 }
 
 // Returns the IDs from `ids` that have no employee row. Used to reject new applications that

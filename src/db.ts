@@ -435,8 +435,10 @@ export async function initializeDatabase() {
         id VARCHAR2(50) PRIMARY KEY,
         requestId VARCHAR2(50) NOT NULL,
         employeeId VARCHAR2(50) NOT NULL,
-        status VARCHAR2(50) DEFAULT 'pending',
-        expiryDate VARCHAR2(50)
+        status VARCHAR2(50),
+        expiryDate VARCHAR2(50),
+        startDate VARCHAR2(50),
+        sortOrder NUMBER(10)
       )`,
       `CREATE TABLE passRequestAccessCodes (
         id VARCHAR2(50) PRIMARY KEY,
@@ -1076,6 +1078,19 @@ export async function initializeDatabase() {
         await connection.execute(`ALTER TABLE passRequestEmployees ADD (expiryDate VARCHAR2(50))`);
         await connection.commit();
         logger.info('Added expiryDate column to passRequestEmployees.');
+      }
+    }
+    // Each person's own start date and their place in the list (the link table holds everything
+    // about a person on an application)
+    for (const [col, type] of [['startDate', 'VARCHAR2(50)'], ['sortOrder', 'NUMBER(10)']]) {
+      try {
+        await connection.execute(`SELECT ${col} FROM passRequestEmployees WHERE 1=0`);
+      } catch (err: any) {
+        if (/ORA-00904|no such column/i.test(String(err?.message))) {
+          await connection.execute(`ALTER TABLE passRequestEmployees ADD (${col} ${type})`);
+          await connection.commit();
+          logger.info(`Added ${col} column to passRequestEmployees.`);
+        }
       }
     }
 
