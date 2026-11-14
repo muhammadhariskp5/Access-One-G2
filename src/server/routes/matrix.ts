@@ -3,6 +3,7 @@ import { logger } from "../log.ts";
 import { ymd } from "../passQuery.ts";
 import { pageClause } from "../employeeQuery.ts";
 import { businessToday, addDays } from "../businessDate.ts";
+import { normalizeDate } from "../dates.ts";
 import type { RouteContext } from "../context.ts";
 
 // --- Access Matrix: who appears, searched, sorted and paged by the database ---
@@ -30,6 +31,70 @@ const dateParam = (v: unknown) => (/^\d{4}-\d{2}-\d{2}$/.test(str(v)) ? str(v) :
 
 export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
   const { oracledb, authorize, getConnection, getTenantOrgId, toCamelCase, getDbEngine } = ctx;
+
+  // Admin diagnostic: why a person does or doesn't appear on the matrix.
+  // GET /api/matrix/explain?q=<name, code or QID>&expiredDays=30
+  // Lists matching employees, every pass linked to them by ID, any pass naming them by code / QID
+  // instead of their ID, and each pass's status, stored and read dates and rule results.
+  app.get("/api/matrix/explain", authorize(['admin']), async (req, res) => {
+    let connection;
+    try {
+      const q = str(req.query.q).slice(0, 200).toLowerCase();
+      if (q.length < 2) return res.status(400).json({ error: "Give ?q= (2+ characters of a name, code or QID)" });
+      const expiredDays = Math.max(0, parseInt(str(req.query.expiredDays), 10) || 30);
+      connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
+      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+      const g = (r: any, k: string) => r[k.toUpperCase()] ?? r[k] ?? null;
+      const binds: Record<string, unknown> = { q: `%${q.replace(/[\\%_]/g, m => '\\' + m)}%` };
+      if (orgId) binds.orgId = orgId;
+      const like = (c: string) => `LOWER(${c}) LIKE :q ESCAPE '\\'`;
+      const emps = ((await connection.execute(
+        `SELECT * FROM employees e WHERE (${['e.name', 'e.employeeId', 'e.qatarId', 'e.qidVisaNumber'].map(like).join(' OR ')})${orgId ? ' AND e.organizationId = :orgId' : ''} FETCH FIRST 10 ROWS ONLY`,
+        binds, opts)).rows || []) as any[];
+      const today = businessToday();
+      const cutoff = addDays(today, -expiredDays);
+      const out = [];
+      for (const e of emps) {
+        const id = String(g(e, 'id'));
+        const names = [id, g(e, 'employeeId'), g(e, 'qatarId'), g(e, 'qidVisaNumber'), g(e, 'visaNumber')]
+          .filter(Boolean).map(v => String(v).trim().toLowerCase());
+        const pb: Record<string, unknown> = { id };
+        names.forEach((n, i) => { pb[`n${i}`] = n; });
+        const ps = ((await connection.execute(
+          `SELECT * FROM passes WHERE employeeId = :id OR LOWER(TRIM(employeeId)) IN (${names.map((_, i) => `:n${i}`).join(', ')})`,
+          pb, opts)).rows || []) as any[];
+        out.push({
+          employee: { id, name: g(e, 'name'), code: g(e, 'employeeId'), qid: g(e, 'qatarId') || g(e, 'qidVisaNumber'),
+            organizationId: g(e, 'organizationId'), deleted: !!g(e, 'deletedAt'), status: g(e, 'status') },
+          passes: ps.map(p => {
+            const st = String(g(p, 'status') || '').trim().toLowerCase();
+            const rm = String(g(p, 'remarks') || '').toLowerCase();
+            const expRaw = g(p, 'expiryDate');
+            const exp = normalizeDate(expRaw);
+            const replaced = ['replaced', 'superseded'].includes(st) || rm.includes('replaced');
+            const expired = st === 'expired' || (!!exp && exp < today);
+            const valid = ['active', 'collected', 'completed', 'received'].includes(st) && !replaced && !expired;
+            const ended = exp || normalizeDate(g(p, 'updatedAt'));
+            const recent = expired && !replaced && !['revoked', 'cancelled', 'rejected', 'draft'].includes(st) && !!ended && ended >= cutoff;
+            return {
+              id: g(p, 'id'), passNumber: g(p, 'passNumber'), status: g(p, 'status'), type: g(p, 'type'),
+              linkedBy: String(g(p, 'employeeId')) === id ? 'id' : `code/QID "${g(p, 'employeeId')}" (not re-linked yet)`,
+              deleted: !!g(p, 'deletedAt'), expiryStored: expRaw, expiryRead: exp,
+              valid, expired, recentlyExpired: recent, replaced,
+            };
+          }),
+        });
+      }
+      res.json({ today, expiredDays, results: out,
+        note: 'A person shows on the default matrix view when any live (not deleted) pass linked by id is valid or recentlyExpired.' });
+    } catch (err) {
+      logger.error('Error explaining matrix', { err });
+      res.status(500).json({ error: "Failed to explain" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
 
   app.get("/api/matrix", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;

@@ -11,6 +11,7 @@ import { syncRequestEmployees, loadPeople, savePeople } from "./src/server/reque
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { normalizeDate, normalizeStoredDates } from "./src/server/dates.ts";
+import { relinkEmployeeReferences } from "./src/server/relink.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
 import { registerMatrixRoutes } from "./src/server/routes/matrix.ts";
@@ -1697,6 +1698,17 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         for (const r of (res.rows || []) as any[]) {
           await syncRequestEmployees(conn, r.ID || r.id);
         }
+      }
+    },
+    {
+      // Passes / applications that name a person by staff code or QID instead of their ID are
+      // re-linked to the ID (the old screens matched them loosely; the server matches by ID), then
+      // the foreign keys that were skipped because of them are added.
+      id: '2026-11-14-relink-employee-references',
+      run: async (conn) => {
+        const r = await relinkEmployeeReferences(conn);
+        logger.info(`[Migration] re-linked ${r.passes} passes and ${r.applications} applications; ${r.unresolved} references could not be matched`);
+        await enforceForeignKeys(conn, getDbEngine());
       }
     }
   ];
