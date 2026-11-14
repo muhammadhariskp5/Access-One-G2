@@ -540,7 +540,7 @@ export function AccessMatrix({
     sort: sortField,
     order: sortOrder,
     expiredDays: expiredWindowDays,
-  }, ['employees', 'passes', 'passApplications', 'locations']);
+  }, ['employees', 'passes', 'passApplications', 'locations'], 200);   // rows are light: 200 per page
   const filteredEmployees: Employee[] = matrixRows;
   const passes: Pass[] = useMemo(() => matrixRows.flatMap(r => r.passes || []), [matrixRows]);
 
@@ -548,7 +548,7 @@ export function AccessMatrix({
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => { if (entries[0].isIntersecting && hasMore) loadMore(); },
-      { threshold: 1.0 }
+      { threshold: 0, rootMargin: '400px' }
     );
     if (observerTarget.current) observer.observe(observerTarget.current);
     return () => observer.disconnect();

@@ -138,7 +138,7 @@ export function PassStatusManagementView({
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => { if (entries[0].isIntersecting && hasMore) loadMore(); },
-      { threshold: 1.0 }
+      { threshold: 0, rootMargin: '400px' }
     );
     if (observerTarget.current) observer.observe(observerTarget.current);
     return () => observer.disconnect();

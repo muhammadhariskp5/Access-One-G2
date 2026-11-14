@@ -25,7 +25,9 @@ export function usePagedList<T extends { id: string }>(
   endpoint: string,
   params: Record<string, string | number | boolean | null | undefined>,
   realtimeResources: string[],
+  pageSize: number = PAGE_SIZE,
 ) {
+  const step = Math.min(MAX_PAGE_SIZE, Math.max(1, pageSize));
   const [items, setItems] = useState<T[]>([]);
   const [total, setTotal] = useState(0);
   const [extra, setExtra] = useState<Record<string, unknown>>({});
@@ -50,7 +52,7 @@ export function usePagedList<T extends { id: string }>(
   // Reload the rows currently loaded (after an edit, or a change made by someone else).
   const reload = useCallback(async () => {
     const mySeq = ++seq.current;
-    const size = Math.min(MAX_PAGE_SIZE, Math.max(PAGE_SIZE, countRef.current));
+    const size = Math.min(MAX_PAGE_SIZE, Math.max(step, countRef.current));
     try {
       const { items: rows, total: t, page: _p, pageSize: _s, ...rest } = await fetchPage({ page: 1, pageSize: size });
       if (mySeq !== seq.current) return;
@@ -58,14 +60,14 @@ export function usePagedList<T extends { id: string }>(
       setTotal(t);
       setExtra(rest);
       countRef.current = rows.length;
-      pageRef.current = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+      pageRef.current = Math.max(1, Math.ceil(rows.length / step));
       setError(null);
     } catch (e: any) {
       if (mySeq === seq.current) setError(e.message);
     } finally {
       if (mySeq === seq.current) setLoading(false);
     }
-  }, [fetchPage]);
+  }, [fetchPage, step]);
 
   // New filters / search / sort: start again from page 1 (debounced while typing).
   useEffect(() => {
@@ -81,7 +83,7 @@ export function usePagedList<T extends { id: string }>(
     setLoadingMore(true);
     try {
       const next = pageRef.current + 1;
-      const data = await fetchPage({ page: next, pageSize: PAGE_SIZE });
+      const data = await fetchPage({ page: next, pageSize: step });
       if (mySeq !== seq.current) return;
       setItems(prev => {
         const seen = new Set(prev.map(e => e.id));
@@ -96,7 +98,7 @@ export function usePagedList<T extends { id: string }>(
     } finally {
       setLoadingMore(false);
     }
-  }, [loading, loadingMore, total, fetchPage]);
+  }, [loading, loadingMore, total, fetchPage, step]);
 
   // Someone (here or elsewhere) changed the data: refresh what's on screen.
   useEffect(() => onDataChanged(resources => {
