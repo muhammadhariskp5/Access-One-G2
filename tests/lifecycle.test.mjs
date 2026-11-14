@@ -66,14 +66,17 @@ test('an existing end reason (revoked) is never overwritten', () => {
   assert.equal(rows.passes.T_P4, 'revoked');
 });
 
+// Each person's status on an application, from the link table (the record)
+const lineStatuses = (appId) => Object.fromEntries(rows.links.filter(l => l.requestId === appId).map(l => [l.employeeId, l.status]));
+
 test('application closes when all its lines have ended', () => {
   assert.equal(rows.apps.T_APP_A.status, 'expired');
-  assert.deepEqual(JSON.parse(rows.apps.T_APP_A.employeeStatuses), { T_E1: 'expired' });
+  assert.deepEqual(lineStatuses('T_APP_A'), { T_E1: 'expired' });
 });
 
 test('application with a still-valid line stays open; only the ended line closes', () => {
   assert.equal(rows.apps.T_APP_B.status, 'issued');
-  assert.deepEqual(JSON.parse(rows.apps.T_APP_B.employeeStatuses), { T_E1: 'expired', T_E2: 'issued' });
+  assert.deepEqual(lineStatuses('T_APP_B'), { T_E1: 'expired', T_E2: 'issued' });
 });
 
 test('employee links mirror the application lines', () => {
