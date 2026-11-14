@@ -127,7 +127,7 @@ export function buildPassList(engine: string, f: PassListQuery, orgId: string | 
     LEFT JOIN employees e ON e.id = x.employeeId
     LEFT JOIN locations l ON l.id = x.locationId`;
   const parts: string[] = ['1 = 1'];
-  const status = `COALESCE(LOWER(x.status), '')`;
+  const status = `COALESCE(LOWER(x.status), '~')`;
   const searching = f.q.length >= 2;
 
   if (f.q) {

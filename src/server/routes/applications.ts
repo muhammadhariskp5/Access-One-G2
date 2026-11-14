@@ -519,7 +519,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
               `UPDATE passes SET status = 'cancelled', updatedAt = :now,
                       remarks = SUBSTR(COALESCE(remarks, '') || ' [Main pass cancelled: holder removed from application]', 1, 1000)
                 WHERE parentPassId = :pid AND deletedAt IS NULL
-                  AND LOWER(COALESCE(status, '')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired', 'replaced')`,
+                  AND LOWER(COALESCE(status, '~')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired', 'replaced')`,
               { now: nowIso, pid }
             );
           }

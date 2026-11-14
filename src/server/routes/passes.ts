@@ -658,7 +658,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
            LEFT JOIN employees e ON e.id = sp.employeeId
            LEFT JOIN locations l ON l.id = sp.locationId
           WHERE sp.type = 'supplementary' AND sp.deletedAt IS NULL${org}
-            AND LOWER(COALESCE(sp.status, '')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired')
+            AND LOWER(COALESCE(sp.status, '~')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired')
             AND (sp.parentPassId IN (${inIds})
                  OR sp.employeeId IN (SELECT t.employeeId FROM passes t WHERE t.id IN (${inIds}) AND t.type = 'main'))`,
         binds, opts

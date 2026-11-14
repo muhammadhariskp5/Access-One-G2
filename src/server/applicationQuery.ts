@@ -74,7 +74,7 @@ function stageCounts(orgId: string | null, binds: Record<string, unknown>): stri
         SELECT pl.requestId AS requestId, ${LINE_STAGE} AS k
           FROM (
             SELECT pre.requestId AS requestId,
-                   LOWER(TRIM(COALESCE(NULLIF(TRIM(pre.status), ''), r2.status, ''))) AS es,
+                   LOWER(TRIM(COALESCE(NULLIF(TRIM(pre.status), ''), r2.status, '~'))) AS es,
                    lp.ps AS ps
               FROM passRequestEmployees pre
               JOIN passRequests r2 ON r2.id = pre.requestId
@@ -98,7 +98,7 @@ const A = 'COALESCE(s.sA, 0)';
 const G = 'COALESCE(s.sG, 0)';
 const P = 'COALESCE(s.sP, 0)';
 const LIVE = `(${T} - ${X})`;
-const RAW = `LOWER(COALESCE(r.status, ''))`;
+const RAW = `LOWER(COALESCE(r.status, '~'))`;
 
 // computeApplicationRollupStatus
 const ROLLUP = `(CASE

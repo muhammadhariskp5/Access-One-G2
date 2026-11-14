@@ -118,10 +118,11 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
       const binds: Record<string, unknown> = { today };
       if (orgId) binds.orgId = orgId;
 
-      // Per-pass rules (alias p)
-      const st = `LOWER(TRIM(COALESCE(p.status, '')))`;
+      // Per-pass rules (alias p). Note: Oracle treats '' as NULL, so a missing value is defaulted to
+      // '~' (never a real status) - with '' every NOT(...) over a pass without remarks became NULL.
+      const st = `LOWER(TRIM(COALESCE(p.status, '~')))`;
       const exp = ymd('p.expiryDate');
-      const REPL = `(${st} IN ('replaced', 'superseded') OR LOWER(COALESCE(p.remarks, '')) LIKE '%replaced%')`;
+      const REPL = `(${st} IN ('replaced', 'superseded') OR LOWER(COALESCE(p.remarks, '~')) LIKE '%replaced%')`;
       const EXPIRED = `(${st} = 'expired' OR (${exp} IS NOT NULL AND ${exp} < :today))`;
       const VALID = `(${st} IN ('active', 'collected', 'completed', 'received') AND NOT ${REPL} AND NOT ${EXPIRED})`;
       const EXPSET = `(${EXPIRED} AND NOT ${REPL} AND ${st} NOT IN ('rejected', 'cancelled'))`;

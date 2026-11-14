@@ -76,7 +76,7 @@ export function registerScopeRoutes(app: express.Express, ctx: RouteContext) {
       }
       if (q !== null) {
         const binds: Record<string, unknown> = { ...orgBind };
-        let where = `e.deletedAt IS NULL AND LOWER(COALESCE(e.status, '')) <> 'inactive'${org('e')}`;
+        let where = `e.deletedAt IS NULL AND LOWER(COALESCE(e.status, '~')) <> 'inactive'${org('e')}`;
         if (q) {
           binds.q = `%${q.toLowerCase().replace(/[\\%_]/g, m => '\\' + m)}%`;
           const like = (c: string) => `LOWER(${c}) LIKE :q ESCAPE '\\'`;

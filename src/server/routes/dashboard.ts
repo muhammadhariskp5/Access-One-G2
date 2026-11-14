@@ -38,7 +38,7 @@ export function registerDashboardRoutes(app: express.Express, ctx: RouteContext)
       const in30 = addDays(today, 30);
       const exp = ymd('p.expiryDate');
       const activePass = `LOWER(p.status) IN (${inList(ACTIVE_PASS)})`;
-      const openApp = `LOWER(COALESCE(r.status, '')) NOT IN (${inList(CLOSED_APP)})`;
+      const openApp = `LOWER(COALESCE(r.status, '~')) NOT IN (${inList(CLOSED_APP)})`;
 
       // Counts
       const [counts] = await rows(`
