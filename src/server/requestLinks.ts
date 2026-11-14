@@ -112,6 +112,57 @@ export async function attachPeople<T extends { id: string }>(connection: any, ap
   return apps;
 }
 
+// While true, saves also write the people into passRequests' old JSON columns, so the previous
+// release still reads correct data if it is ever rolled back to. Turn off (and later drop the
+// columns) once this release has settled.
+export const KEEP_JSON_COPY = true;
+
+// Who is on one application, with their own status and dates (from the link table).
+export async function loadPeople(connection: any, requestId: string): Promise<AppPeople> {
+  return (await readPeople(connection, [requestId])).get(String(requestId))
+    || { employeeIds: [], employeeStatuses: {}, individualExpiries: {}, individualStartDates: {} };
+}
+
+// Save who is on one application. The link table is the record; see KEEP_JSON_COPY.
+// Runs inside the caller's transaction.
+export async function savePeople(connection: any, requestId: string, people: AppPeople): Promise<void> {
+  const clean: AppPeople = {
+    employeeIds: Array.from(new Set((people.employeeIds || []).map(String).filter(Boolean))),
+    employeeStatuses: people.employeeStatuses || {},
+    individualExpiries: people.individualExpiries || {},
+    individualStartDates: people.individualStartDates || {},
+  };
+  await writePeople(connection, requestId, clean);
+  if (KEEP_JSON_COPY) {
+    await connection.execute(
+      `UPDATE passRequests SET employeeIds = :ids, employeeStatuses = :st, individualExpiries = :ex, individualStartDates = :sd WHERE id = :id`,
+      {
+        ids: JSON.stringify(clean.employeeIds), st: JSON.stringify(clean.employeeStatuses),
+        ex: JSON.stringify(clean.individualExpiries), sd: JSON.stringify(clean.individualStartDates), id: requestId,
+      }
+    );
+  }
+}
+
+// Body / update fields that describe the people; savers take these out of a column update.
+export const PEOPLE_FIELDS = ['employeeIds', 'employeeStatuses', 'individualExpiries', 'individualStartDates'] as const;
+
+// Merge people fields from a request body (arrays/objects or JSON strings) over the current people.
+export function mergePeople(current: AppPeople, body: Record<string, any>): AppPeople {
+  const pick = <T,>(k: string, fallback: T): T => {
+    const v = body[k] ?? body[k.toUpperCase()];
+    if (v === undefined) return fallback;
+    if (typeof v === 'string') return parseJson<T>(v, fallback);
+    return (v ?? fallback) as T;
+  };
+  return {
+    employeeIds: pick<string[]>('employeeIds', current.employeeIds),
+    employeeStatuses: pick<Record<string, string>>('employeeStatuses', current.employeeStatuses),
+    individualExpiries: pick<Record<string, string>>('individualExpiries', current.individualExpiries),
+    individualStartDates: pick<Record<string, string>>('individualStartDates', current.individualStartDates),
+  };
+}
+
 // Legacy entry point for writers that still keep the people in passRequests' JSON columns: copy
 // them into the link table. Called inside the same transaction as the write.
 export async function syncRequestEmployees(connection: any, requestId: string): Promise<void> {
@@ -182,15 +233,15 @@ export async function cancelEmployeesOnApplications(connection: any, employeeIds
   let changedApps = 0;
   for (const requestId of requestIds) {
     const appRes = await connection.execute(
-      `SELECT id, status, employeeIds, employeeStatuses FROM passRequests WHERE id = :id AND deletedAt IS NULL`,
+      `SELECT id, status FROM passRequests WHERE id = :id AND deletedAt IS NULL`,
       [requestId], opts
     );
     const app: any = appRes.rows?.[0];
     if (!app) continue;
-    let empIds: string[] = [];
-    let statuses: Record<string, string> = {};
-    try { empIds = JSON.parse(app.EMPLOYEEIDS || app.employeeIds || '[]') || []; } catch { empIds = []; }
-    try { statuses = JSON.parse(app.EMPLOYEESTATUSES || app.employeeStatuses || '{}') || {}; } catch { statuses = {}; }
+    const appId = String(app.ID || app.id);
+    const people = await loadPeople(connection, appId);
+    const empIds = people.employeeIds;
+    const statuses: Record<string, string> = { ...people.employeeStatuses };
     const appStatus = String(app.STATUS || app.status || 'pending').toLowerCase();
 
     const cancelled: string[] = [];
@@ -207,9 +258,10 @@ export async function cancelEmployeesOnApplications(connection: any, employeeIds
     const allClosed = empIds.length > 0 && empIds.every(id => ['cancelled', 'rejected'].includes(String(statuses[id] || appStatus).toLowerCase()));
     const newStatus = allClosed ? 'cancelled' : (app.STATUS || app.status);
     await connection.execute(
-      `UPDATE passRequests SET employeeStatuses = :statuses, status = :status, updatedAt = :updatedAt WHERE id = :id`,
-      { statuses: JSON.stringify(statuses), status: newStatus, updatedAt: now, id: app.ID || app.id }
+      `UPDATE passRequests SET status = :status, updatedAt = :updatedAt WHERE id = :id`,
+      { status: newStatus, updatedAt: now, id: appId }
     );
+    await savePeople(connection, appId, { ...people, employeeStatuses: statuses });
     await connection.execute(
       `INSERT INTO requestHistory (id, requestId, userId, action, remarks, timestamp)
        VALUES (:id, :requestId, :userId, 'EMPLOYEE_DELETED', :remarks, :ts)`,
@@ -218,7 +270,6 @@ export async function cancelEmployeesOnApplications(connection: any, employeeIds
         remarks: `Cancelled for deleted employee(s): ${cancelled.join(', ')}${allClosed ? '. Application cancelled: nobody left to issue.' : ''}`
       }
     );
-    await syncRequestEmployees(connection, app.ID || app.id);
     changedApps++;
   }
   return changedApps;

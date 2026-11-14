@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees } from "../requestLinks.ts";
+import { readPeople, savePeople } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
 import { realtimeClients, pendingNotificationUsers, publishChange, flushNotificationPushes, REALTIME_RESOURCE_MAP } from "../realtime.ts";
@@ -217,31 +217,23 @@ export function registerResourceRoutes(app: express.Express, ctx: RouteContext) 
       }
       // Sync pending applications whose employeeStatuses might have been incorrectly set to processing on creation
       const pendingApps = await connection.execute(
-        `SELECT id, employeeStatuses, employeeIds FROM passRequests WHERE LOWER(status) IN ('pending', 'under_review')`,
+        `SELECT id FROM passRequests WHERE LOWER(status) IN ('pending', 'under_review')`,
         [],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
       if (pendingApps.rows && pendingApps.rows.length > 0) {
-        for (const row of (pendingApps.rows as any[])) {
-          const empStatuses = JSON.parse(row.EMPLOYEESTATUSES || '{}');
-          const empIds = JSON.parse(row.EMPLOYEEIDS || '[]');
+        const ids = (pendingApps.rows as any[]).map(r => String(r.ID ?? r.id));
+        const peopleById = await readPeople(connection, ids);
+        for (const [appId, people] of peopleById) {
+          const empStatuses = { ...people.employeeStatuses };
           let changed = false;
-          empIds.forEach((id: string) => {
+          people.employeeIds.forEach((id: string) => {
             if (empStatuses[id] === 'processing') {
               empStatuses[id] = 'pending';
               changed = true;
             }
           });
-          if (changed) {
-            await connection.execute(
-              `UPDATE passRequests SET employeeStatuses = :statuses WHERE id = :id`,
-              { statuses: JSON.stringify(empStatuses), id: row.ID }
-            );
-            await connection.execute(
-              `UPDATE passRequestEmployees SET status = 'pending' WHERE UPPER(requestId) = UPPER(:id) AND status = 'processing'`,
-              { id: row.ID }
-            );
-          }
+          if (changed) await savePeople(connection, appId, { ...people, employeeStatuses: empStatuses });
         }
         await connection.commit();
       }

@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
-import { syncRequestEmployees } from "./src/server/requestLinks.ts";
+import { syncRequestEmployees, loadPeople, savePeople } from "./src/server/requestLinks.ts";
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
@@ -1374,7 +1374,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       scope = ` AND UPPER(r.id) IN (${ids.map((_, i) => `:r${i}`).join(', ')})`;
     }
     const appsRes = await connection.execute(
-      `SELECT r.id, r.status, r.employeeIds, r.employeeStatuses FROM passRequests r
+      `SELECT r.id, r.status FROM passRequests r
        WHERE LOWER(r.status) NOT IN (${closedList})${scope}
        AND EXISTS (SELECT 1 FROM passes p WHERE UPPER(p.requestId) = UPPER(r.id)
                    AND LOWER(p.status) IN ('expired', 'replaced', 'superseded', 'revoked'))`,
@@ -1383,11 +1383,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     );
 
     for (const app of (appsRes.rows || []) as any[]) {
-      const appId = app.ID || app.id;
-      let empIds: string[] = [];
-      let statuses: Record<string, string> = {};
-      try { empIds = JSON.parse(app.EMPLOYEEIDS || app.employeeIds || '[]') || []; } catch { empIds = []; }
-      try { statuses = JSON.parse(app.EMPLOYEESTATUSES || app.employeeStatuses || '{}') || {}; } catch { statuses = {}; }
+      const appId = String(app.ID || app.id);
+      const people = await loadPeople(connection, appId);
+      const empIds = people.employeeIds;
+      const statuses: Record<string, string> = { ...people.employeeStatuses };
 
       const passRes = await connection.execute(
         `SELECT employeeId, status, updatedAt FROM passes WHERE UPPER(requestId) = UPPER(:id)`,
@@ -1438,9 +1437,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       }
 
       await connection.execute(
-        `UPDATE passRequests SET employeeStatuses = :statuses, status = :status, updatedAt = :updatedAt WHERE UPPER(id) = UPPER(:id)`,
-        { statuses: JSON.stringify(statuses), status: appStatus, updatedAt: nowIso, id: appId }
+        `UPDATE passRequests SET status = :status, updatedAt = :updatedAt WHERE id = :id`,
+        { status: appStatus, updatedAt: nowIso, id: appId }
       );
+      await savePeople(connection, appId, { ...people, employeeStatuses: statuses });
       await connection.execute(
         `INSERT INTO requestHistory (id, requestId, userId, action, remarks, timestamp)
          VALUES (:id, :requestId, :userId, :action, :remarks, :timestamp)`,
@@ -1453,7 +1453,6 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
           timestamp: nowIso
         }
       );
-      await syncRequestEmployees(connection, appId);
     }
     return appsChanged;
   }

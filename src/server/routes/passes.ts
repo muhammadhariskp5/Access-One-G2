@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees, findMissingEmployees } from "../requestLinks.ts";
+import { findMissingEmployees, loadPeople, savePeople } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
 import { pageClause } from "../employeeQuery.ts";
@@ -83,9 +83,11 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       // Use the application's ID exactly as stored. (Upper-casing the incoming ID made rows of
       // older, mixed-case applications point at an ID that doesn't exist.)
       let requestId = String(existingRequestId || req.body.requestId || '').trim();
+      let requestExists = false;
       if (requestId) {
         const found = await connection.execute(`SELECT id FROM passRequests WHERE UPPER(id) = UPPER(:id)`, [requestId], { outFormat: oracledb.OUT_FORMAT_OBJECT });
         const row: any = found.rows?.[0];
+        requestExists = !!row;
         requestId = row ? String(row.ID ?? row.id) : requestId.toUpperCase();
       } else {
         requestId = newRef();
@@ -138,20 +140,12 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       let individualExpiries = req.body.individualExpiries || {};
       let individualStartDates = req.body.individualStartDates || {};
 
-      if (!isDirectEntry) {
-        // Fetch existing request to get its individualExpiries/individualStartDates if not provided in body
-        const reqResult = await connection.execute(
-          `SELECT individualExpiries, individualStartDates FROM passRequests WHERE id = :id`,
-          [requestId],
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        if (reqResult.rows && reqResult.rows[0]) {
-          const storedExpiries = JSON.parse(reqResult.rows[0].INDIVIDUALEXPIRIES || '{}');
-          individualExpiries = { ...storedExpiries, ...individualExpiries };
-
-          const storedStartDates = JSON.parse(reqResult.rows[0].INDIVIDUALSTARTDATES || '{}');
-          individualStartDates = { ...storedStartDates, ...individualStartDates };
-        }
+      // People already on an existing application (the link table)
+      const storedPeople = requestExists ? await loadPeople(connection, requestId) : null;
+      if (!isDirectEntry && storedPeople) {
+        // Keep its own dates for anyone the form didn't send
+        individualExpiries = { ...storedPeople.individualExpiries, ...individualExpiries };
+        individualStartDates = { ...storedPeople.individualStartDates, ...individualStartDates };
       }
 
       const accessCodes = filteredCommonData.accessCodes || req.body.accessCodes || [];
@@ -192,11 +186,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         status: initialRequestStatus,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        employeeIds: JSON.stringify(employeeIds),
-        employeeStatuses: JSON.stringify(employeeStatuses),
         accessCodes: JSON.stringify(accessCodes),
-        individualExpiries: JSON.stringify(individualExpiries),
-        individualStartDates: JSON.stringify(individualStartDates),
         authorityAppNumber: authorityAppNumber,
         parentPassId: filteredCommonData.parentPassId || null,
         startDate: filteredCommonData.startDate,
@@ -215,12 +205,9 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         // Update existing request with potentially new dates and individual expiries from the application form
         const updates = toOracleKeys({
           status: initialRequestStatus,
-          employeeStatuses: JSON.stringify(employeeStatuses),
           authorityAppNumber: commonData.authorityAppNumber || authorityAppNumber,
           startDate: filteredCommonData.startDate,
           endDate: filteredCommonData.endDate || filteredCommonData.expiryDate,
-          individualExpiries: JSON.stringify(individualExpiries),
-          individualStartDates: JSON.stringify(individualStartDates),
           updatedAt: new Date().toISOString()
         });
         const setClause = Object.keys(updates).map((key, i) => `${key} = :${i + 1}`).join(', ');
@@ -229,8 +216,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           [...Object.values(updates), requestId]
         );
 
-        // Clear old mappings and old passes if updating
-        await connection.execute(`DELETE FROM passRequestEmployees WHERE UPPER(requestId) = UPPER(:id)`, [requestId]);
+        // Clear old access-code mappings and old passes if updating
         await connection.execute(`DELETE FROM passRequestAccessCodes WHERE UPPER(requestId) = UPPER(:id)`, [requestId]);
         // Previous passes of this application are superseded (kept for history, hidden from lists)
         await connection.execute(
@@ -239,8 +225,16 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         );
       }
 
-      // Populate mappings (status + per-person expiry, from the request just written)
-      await syncRequestEmployees(connection, requestId);
+      // The people on it: a new application holds this batch; an existing one keeps its people,
+      // with the batch's statuses and the merged dates (as before)
+      if (!existingRequestId || requestExists) {
+        await savePeople(connection, requestId, {
+          employeeIds: storedPeople && existingRequestId ? storedPeople.employeeIds : employeeIds,
+          employeeStatuses,
+          individualExpiries,
+          individualStartDates,
+        });
+      }
 
       for (const acId of accessCodeIds) {
         await connection.execute(
@@ -723,8 +717,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           const passReq = toCamelCase(reqResult.rows?.[0] as any);
 
           if (passReq) {
-            const employeeStatuses = JSON.parse(passReq.employeeStatuses || '{}');
-            const employeeIds = JSON.parse(passReq.employeeIds || '[]');
+            const reqId = String(passReq.id);
+            const people = await loadPeople(connection, reqId);
+            const employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
+            const employeeIds = people.employeeIds;
 
             const normalizedStatus = ['active', 'collected'].includes(targetPassStatus) ? 'collected' : targetPassStatus;
             employeeStatuses[currentPass.employeeId] = normalizedStatus;
@@ -757,9 +753,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
             }
 
             await connection.execute(
-              `UPDATE passRequests SET employeeStatuses = :statuses, status = :status, updatedAt = :updatedAt WHERE UPPER(id) = UPPER(:id)`,
-              { statuses: JSON.stringify(employeeStatuses), status: newReqStatus, updatedAt, id: currentPass.requestId }
+              `UPDATE passRequests SET status = :status, updatedAt = :updatedAt WHERE id = :id`,
+              { status: newReqStatus, updatedAt, id: reqId }
             );
+            await savePeople(connection, reqId, { ...people, employeeStatuses });
 
             // Record request history
             const histId = newId();
@@ -798,7 +795,6 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           if (['expired', 'revoked', 'replaced', 'superseded'].includes(String(targetPassStatus).toLowerCase())) {
             await closeApplicationsForEndedPasses(connection, updatedAt, [currentPass.requestId]);
           }
-          await syncRequestEmployees(connection, currentPass.requestId);
         }
       }
       await connection.commit();
@@ -833,15 +829,14 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       // Sync the request status too
       const requestId = pass.REQUESTID;
       if (requestId) {
-        const reqResult = await connection.execute(`SELECT employeeStatuses FROM passRequests WHERE id = :id`, [requestId]);
-        const statuses = JSON.parse(reqResult.rows?.[0]?.[0] || '{}');
-        statuses[pass.EMPLOYEEID] = 'completed';
+        const people = await loadPeople(connection, requestId);
+        const statuses = { ...people.employeeStatuses, [pass.EMPLOYEEID]: 'completed' };
 
         await connection.execute(
-          `UPDATE passRequests SET employeeStatuses = :statuses, status = 'processing', updatedAt = :now WHERE id = :id`,
-          { statuses: JSON.stringify(statuses), now: new Date().toISOString(), id: requestId }
+          `UPDATE passRequests SET status = 'processing', updatedAt = :now WHERE id = :id`,
+          { now: new Date().toISOString(), id: requestId }
         );
-        await syncRequestEmployees(connection, requestId);
+        await savePeople(connection, requestId, { ...people, employeeStatuses: statuses });
       }
 
       await connection.commit();

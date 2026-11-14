@@ -37,6 +37,8 @@ before(async () => {
   // Revoked and past its date -> must stay 'revoked'
   db.run(`INSERT INTO passes (id, requestId, employeeId, locationId, type, status, expiryDate, createdAt, updatedAt)
           VALUES ('T_P4', 'T_NONE', 'T_E2', 'T_LOC', 'main', 'revoked', :y, :n, :n)`, { ':y': yesterday, ':n': now });
+  // The applications were seeded as JSON: build their link rows from it, as the deploy migration does
+  db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-14-link-table-people'`);
   db.save();
 
   srv = await startServer({ dbPath });

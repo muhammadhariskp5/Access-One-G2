@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
-import { syncRequestEmployees, findMissingEmployees, attachPeople } from "../requestLinks.ts";
+import { findMissingEmployees, attachPeople, loadPeople, savePeople, mergePeople, PEOPLE_FIELDS } from "../requestLinks.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
 import { signSessionToken, verifySessionToken, setSessionCookie, clearSessionCookie, getSessionToken } from "../session.ts";
@@ -165,12 +165,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const newRequest = toOracleKeys({ 
         ...filteredBody, 
         type: req.body.type || filteredBody.type || 'main',
-        employeeStatuses: JSON.stringify(employeeStatuses),
-        employeeIds: JSON.stringify(employeeIds),
         temporaryNames: JSON.stringify(req.body.temporaryNames || []),
         accessCodes: JSON.stringify(req.body.accessCodes || []),
-        individualExpiries: JSON.stringify(req.body.individualExpiries || {}),
-        individualStartDates: JSON.stringify(req.body.individualStartDates || {}),
         parentPassId: req.body.parentPassId || null,
         organizationId: effectiveOrgId,
         id: requestId, 
@@ -188,8 +184,13 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         values
       );
 
-      // Populate passRequestEmployees mapping table (status + per-person expiry)
-      await syncRequestEmployees(connection, requestId);
+      // The people on it (link table: status + own dates per person)
+      await savePeople(connection, requestId, {
+        employeeIds,
+        employeeStatuses,
+        individualExpiries: req.body.individualExpiries || {},
+        individualStartDates: req.body.individualStartDates || {},
+      });
 
       // Populate passRequestAccessCodes mapping table
       const accessCodeIds = Array.from(new Set(req.body.accessCodeIds || []));
@@ -276,8 +277,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
     const appRow = appResult.rows?.[0] as any;
     if (!appRow) return null;
 
-    let employeeStatuses: Record<string, string> = JSON.parse(appRow.EMPLOYEESTATUSES || '{}');
-    let employeeIds: string[] = JSON.parse(appRow.EMPLOYEEIDS || '[]');
+    const realId = String(appRow.ID ?? appRow.id);
+    const people = await loadPeople(connection, realId);
+    let employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
+    let employeeIds: string[] = people.employeeIds;
 
     employeeIds.forEach(empId => {
       if (!employeeStatuses[empId]) {
@@ -322,8 +325,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       );
       const existingEmpIds = new Set((existingPassesRes.rows || []).map((r: any) => r.EMPLOYEEID || r.employeeId));
 
-      const indExpiries = JSON.parse(appRow.INDIVIDUALEXPIRIES || '{}');
-      const indStartDates = JSON.parse(appRow.INDIVIDUALSTARTDATES || '{}');
+      const indExpiries = people.individualExpiries;
+      const indStartDates = people.individualStartDates;
       const getOneYearLater = (sStr?: string) => {
         const d = sStr ? new Date(sStr) : new Date();
         if (isNaN(d.getTime())) {
@@ -430,13 +433,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       );
     }
 
-    // Persist updated employeeStatuses to the application and mapping table
-    await connection.execute(
-      `UPDATE passRequests SET employeeStatuses = :statuses, updatedAt = :updatedAt WHERE UPPER(id) = UPPER(:id)`,
-      { statuses: JSON.stringify(employeeStatuses), updatedAt: now, id: applicationId }
-    );
-
-    await syncRequestEmployees(connection, applicationId);
+    // Persist each person's updated status
+    await connection.execute(`UPDATE passRequests SET updatedAt = :updatedAt WHERE id = :id`, { updatedAt: now, id: realId });
+    await savePeople(connection, realId, { ...people, employeeStatuses });
 
     return employeeStatuses;
   }
@@ -464,6 +463,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         }
       }
 
+      // People (who is on it, their statuses and own dates) go to the link table
+      const peopleChanged = PEOPLE_FIELDS.some(f => filteredUpdates[f] !== undefined);
+      for (const f of PEOPLE_FIELDS) delete filteredUpdates[f];
+
       const updates = toOracleKeys(filteredUpdates);
       delete updates.ID;
 
@@ -472,6 +475,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         `UPDATE passRequests SET ${setClause} WHERE UPPER(id) = UPPER(:id)`,
         { ...updates, id: req.params.id }
       );
+      if (peopleChanged) {
+        // (IDs of employees that don't exist are skipped, as before)
+        await savePeople(connection, req.params.id, mergePeople(await loadPeople(connection, req.params.id), req.body));
+      }
 
       // Trigger defined sub-process effect if application status was updated
       if (req.body.status && req.body.employeeStatuses === undefined) {
@@ -553,11 +560,6 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         logger.error("Failed to log requestHistory", { err: hErr });
       }
 
-      // Keep the employee ↔ application mapping table in step with employeeIds / statuses
-      if (req.body.employeeIds !== undefined || req.body.employeeStatuses !== undefined || req.body.status !== undefined) {
-        await syncRequestEmployees(connection, req.params.id);
-      }
-
       await connection.commit();
 
       logAction(req, 'UPDATE', 'application', req.params.id, `Updated application: ${req.body.status || 'data update'}`);
@@ -621,7 +623,6 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         logger.error("Failed to log request history", { err: hErr });
       }
 
-      await syncRequestEmployees(connection, req.params.id);
       await connection.commit();
       const notifyUserId = application.REQUESTERID || application.requesterId;
       if (notifyUserId && notifyUserId !== 'system') {
@@ -790,8 +791,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const application = result.rows?.[0] as any;
       if (!application) return res.status(404).json({ error: "Application not found" });
 
-      const employeeStatuses = JSON.parse(application.EMPLOYEESTATUSES || '{}');
-      const allEmployeeIds = JSON.parse(application.EMPLOYEEIDS || '[]');
+      const appId = String(application.ID ?? application.id);
+      const people = await loadPeople(connection, appId);
+      const employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
+      const allEmployeeIds = people.employeeIds;
 
       (employeeIds || []).forEach((empId: string) => {
         const lowerStatus = status?.toLowerCase();
@@ -862,10 +865,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       }
 
       await connection.execute(
-        `UPDATE passRequests SET employeeStatuses = :statuses, status = :status, updatedAt = :updatedAt WHERE UPPER(id) = UPPER(:id)`,
-        { statuses: JSON.stringify(employeeStatuses), status: newStatus, updatedAt: now, id: req.params.id }
+        `UPDATE passRequests SET status = :status, updatedAt = :updatedAt WHERE id = :id`,
+        { status: newStatus, updatedAt: now, id: appId }
       );
-      await syncRequestEmployees(connection, req.params.id);
+      await savePeople(connection, appId, { ...people, employeeStatuses });
 
       // If status is collected/completed, mark the corresponding passes as active/collected with updatedAt timestamp
       const effectiveStatus = status?.toLowerCase();
@@ -896,8 +899,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
             const year = new Date().getFullYear();
             const random = await nextSequenceValue(connection, `PASS-${year}`);
             const passNumber = `PASS-${year}-${random}`;
-            const indExpiries = JSON.parse(application.INDIVIDUALEXPIRIES || '{}');
-            const indStartDates = JSON.parse(application.INDIVIDUALSTARTDATES || '{}');
+            const indExpiries = people.individualExpiries;
+            const indStartDates = people.individualStartDates;
             const empStart = indStartDates[empId] || application.STARTDATE || now.split('T')[0];
             const getOneYearLater = (sStr?: string) => {
               const d = sStr ? new Date(sStr) : new Date();
@@ -1047,8 +1050,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const application = result.rows?.[0] as any;
       if (!application) return res.status(404).json({ error: "Application not found" });
 
-      const employeeStatuses = JSON.parse(application.EMPLOYEESTATUSES || '{}');
-      const employeeIds = JSON.parse(application.EMPLOYEEIDS || '[]');
+      const appId = String(application.ID ?? application.id);
+      const people = await loadPeople(connection, appId);
+      const employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
+      const employeeIds = people.employeeIds;
 
       employeeStatuses[req.params.employeeId] = req.body.status;
 
@@ -1063,10 +1068,10 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       }
 
       await connection.execute(
-        `UPDATE passRequests SET employeeStatuses = :statuses, status = :status, updatedAt = :updatedAt WHERE UPPER(id) = UPPER(:id)`,
-        { statuses: JSON.stringify(employeeStatuses), status: newStatus, updatedAt: new Date().toISOString(), id: req.params.id }
+        `UPDATE passRequests SET status = :status, updatedAt = :updatedAt WHERE id = :id`,
+        { status: newStatus, updatedAt: new Date().toISOString(), id: appId }
       );
-      await syncRequestEmployees(connection, req.params.id);
+      await savePeople(connection, appId, { ...people, employeeStatuses });
 
       // If status is collected/completed/rejected/cancelled, update or create the corresponding pass
       const terminalStatuses = ['collected', 'completed', 'rejected', 'cancelled'];
@@ -1084,8 +1089,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
           const year = new Date().getFullYear();
           const random = await nextSequenceValue(connection, `PASS-${year}`);
           const passNumber = `PASS-${year}-${random}`;
-          const indExpiries = JSON.parse(application.INDIVIDUALEXPIRIES || '{}');
-          const indStartDates = JSON.parse(application.INDIVIDUALSTARTDATES || '{}');
+          const indExpiries = people.individualExpiries;
+          const indStartDates = people.individualStartDates;
           const empId = req.params.employeeId;
           const empStart = indStartDates[empId] || application.STARTDATE || new Date().toISOString().split('T')[0];
           const calcOneYr = (sStr?: string) => {
