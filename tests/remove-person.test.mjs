@@ -77,3 +77,24 @@ test('people holding a live pass on an application are returned with it, for the
   const r = await admin.post('/api/scope', { applicationIds: ['APP1'] });
   assert.ok(r.body.employees.some(e => e.id === 'E2' && e.name === 'Remove Me'));
 });
+
+test('saving an edit at the same stage does not re-apply it; a newly added person starts Under Review', async () => {
+  // APP1 is at "issued" with E1 issued; the edit form resends status "issued" and adds E2
+  const r = await admin.patch('/api/passApplications/APP1', { status: 'issued', employeeIds: ['E1', 'E2'], remarks: 'edited' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const s = await admin.post('/api/scope', { applicationIds: ['APP1'] });
+  const app = s.body.applications.find(a => a.id === 'APP1');
+  assert.deepEqual(app.employeeIds, ['E1', 'E2']);
+  assert.equal(app.employeeStatuses.E2, 'pending');   // not "issued" without a pass
+  assert.equal(app.employeeStatuses.E1, 'issued');
+  assert.equal(app.status, 'issued');
+});
+
+test('a real stage change still applies to everyone', async () => {
+  const r = await admin.patch('/api/passApplications/APP1', { status: 'processing' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const s = await admin.post('/api/scope', { applicationIds: ['APP1'] });
+  const app = s.body.applications.find(a => a.id === 'APP1');
+  assert.equal(app.employeeStatuses.E1, 'processing');
+  assert.equal(app.employeeStatuses.E2, 'processing');
+});

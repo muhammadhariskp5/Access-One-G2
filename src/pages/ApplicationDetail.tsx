@@ -1094,7 +1094,8 @@ export function ApplicationDetail({
           employeeIds: editEmployeeIds,
           individualStartDates: editIndStartDates,
           individualExpiries: editIndExpiries,
-          status: editStatus,
+          // Only a real stage change is sent (the server applies it to everyone on the application)
+          ...(editStatus && editStatus !== application.status ? { status: editStatus } : {}),
           remarks: editRemarks
         })
       });

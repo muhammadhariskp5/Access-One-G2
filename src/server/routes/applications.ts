@@ -463,6 +463,12 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         }
       }
 
+      // A stage is applied to everyone only when it actually changes (an edit form resends the
+      // current status with every save)
+      const curRes = await connection.execute(`SELECT status FROM passRequests WHERE id = :id`, { id: req.params.id }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+      const curStatus = String(((curRes.rows || [])[0] as any)?.STATUS ?? ((curRes.rows || [])[0] as any)?.status ?? '').toLowerCase();
+      const statusChanged = !!req.body.status && String(req.body.status).toLowerCase() !== curStatus;
+
       // People (who is on it, their statuses and own dates) go to the link table
       const peopleChanged = PEOPLE_FIELDS.some(f => filteredUpdates[f] !== undefined);
       for (const f of PEOPLE_FIELDS) delete filteredUpdates[f];
@@ -479,6 +485,14 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         // (IDs of employees that don't exist are skipped, as before)
         const before = await loadPeople(connection, req.params.id);
         const after = mergePeople(before, req.body);
+        // Someone newly added starts at Under Review (unless a status was given for them), rather
+        // than silently taking the application's current stage (e.g. "issued" with no pass)
+        const had = new Set(before.employeeIds);
+        for (const empId of after.employeeIds) {
+          if (!had.has(empId) && !after.employeeStatuses[empId]) {
+            after.employeeStatuses = { ...after.employeeStatuses, [empId]: 'pending' };
+          }
+        }
         await savePeople(connection, req.params.id, after);
 
         // People taken off the application: their passes on it end here (cancelled, kept for
@@ -513,7 +527,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       }
 
       // Trigger defined sub-process effect if application status was updated
-      if (req.body.status && req.body.employeeStatuses === undefined) {
+      if (statusChanged && req.body.employeeStatuses === undefined) {
         await applyApplicationStatusSubProcessEffect(connection, req.params.id, req.body.status, filteredUpdates.updatedAt);
       }
 
@@ -580,7 +594,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
 
       // Record request history
       const histId = newId();
-      const actionText = req.body.status ? `STATUS_UPDATE (${req.body.status})` : 'DATA_UPDATE';
+      const actionText = statusChanged ? `STATUS_UPDATE (${req.body.status})` : 'DATA_UPDATE';
       const remarkText = req.body.approvalRemarks || req.body.remarks || `Application updated: ${req.body.status || 'data change'}`;
       try {
         await connection.execute(
