@@ -10,6 +10,7 @@ import { Modal } from '../components/common/Modal';
 import { PassSubmissionForm } from '../components/passes/PassSubmissionForm';
 import { PassApplicationsView } from '../components/passes/PassApplicationsView';
 import { PassStatusManagementView } from '../components/passes/PassStatusManagementView';
+import { useScopedRecords } from '../hooks/useScopedRecords';
 
 export interface PassesProps {
   passes: Pass[];
@@ -28,9 +29,6 @@ export interface PassesProps {
   showToast: (msg: string, type?: 'success' | 'error') => void;
   showConfirm: (title: string, message: string, onConfirm: () => void) => void;
   view?: 'applications' | 'status-management';
-  // The full lists are only needed by the application form: requested when it opens
-  formListsReady?: boolean;
-  onNeedFormLists?: () => void;
 }
 
 export function Passes({
@@ -48,10 +46,25 @@ export function Passes({
   globalSearch,
   showToast,
   showConfirm,
-  view = 'applications',
-  formListsReady = true,
-  onNeedFormLists = () => {}
+  view = 'applications'
 }: PassesProps) {
+  // The application form works on scoped records (the people involved and their passes /
+  // applications), loaded when it opens and as its picker is searched: no full lists.
+  const scoped = useScopedRecords();
+  const [formReady, setFormReady] = useState(true);
+  const openForm = async (data: any) => {
+    const appId = data?.applicationId || data?.requestId || data?.id;
+    const empIds: string[] = Array.isArray(data?.employeeIds) ? data.employeeIds : [];
+    if (!appId && empIds.length === 0) { setFormReady(true); return; }
+    setFormReady(false);
+    try {
+      await scoped.load({ applicationIds: appId ? [String(appId)] : [], employeeIds: empIds });
+    } catch (err: any) {
+      showToast(err.message || 'Failed to load application', 'error');
+    } finally {
+      setFormReady(true);
+    }
+  };
   const [isNewPassModalOpen, setIsNewPassModalOpen] = useState(false);
   const [passModalData, setPassModalData] = useState<any>(null);
   const [isNewApplicationModalOpen, setIsNewApplicationModalOpen] = useState(false);
@@ -101,8 +114,8 @@ export function Passes({
               currentUser={currentUser}
               onSuccess={onSuccess}
               globalSearch={globalSearch}
-              onNewPass={(data) => { onNeedFormLists(); setPassModalData(data); setIsNewPassModalOpen(true); }}
-              onNewApplication={(data) => { onNeedFormLists(); setApplicationModalData(data); setIsNewApplicationModalOpen(true); }}
+              onNewPass={(data) => { openForm(data); setPassModalData(data); setIsNewPassModalOpen(true); }}
+              onNewApplication={(data) => { openForm(data); setApplicationModalData(data); setIsNewApplicationModalOpen(true); }}
               showToast={showToast}
               showConfirm={showConfirm}
               logAction={logAction}
@@ -195,19 +208,20 @@ export function Passes({
         title={passModalData?.applicationId ? "Issue Passes from Application" : (passModalData?.isDirect ? "Direct Entry Pass" : "New Pass Application")}
         size="6xl"
       >
-        {!formListsReady ? (
+        {!formReady ? (
           <div className="py-16 text-center text-xs text-[#6B7280]">Loading…</div>
         ) : (
         <PassSubmissionForm 
-          employees={employees}
+          employees={scoped.employees}
+          loadScope={scoped.load}
           locations={locations}
           categories={categories}
           accessCodes={accessCodes}
           projects={projects}
           divisions={divisions}
           departments={departments}
-          passes={passes}
-          applications={applications}
+          passes={scoped.passes}
+          applications={scoped.applications}
           onSuccess={onSuccess}
           onClose={() => { setIsNewPassModalOpen(false); setPassModalData(null); }}
           currentUser={currentUser}
@@ -224,19 +238,20 @@ export function Passes({
         title="New Pass Application"
         size="6xl"
       >
-        {!formListsReady ? (
+        {!formReady ? (
           <div className="py-16 text-center text-xs text-[#6B7280]">Loading…</div>
         ) : (
         <PassSubmissionForm 
-          employees={employees}
+          employees={scoped.employees}
+          loadScope={scoped.load}
           locations={locations}
           categories={categories}
           accessCodes={accessCodes}
           projects={projects}
           divisions={divisions}
           departments={departments}
-          passes={passes}
-          applications={applications}
+          passes={scoped.passes}
+          applications={scoped.applications}
           currentUser={currentUser}
           onSuccess={onSuccess}
           onClose={() => { setIsNewApplicationModalOpen(false); setApplicationModalData(null); }}

@@ -14,6 +14,7 @@ import { isApplicationLineInPipeline } from '../../utils/passStatus';
 import { Modal } from '../common/Modal';
 import { SearchInput } from '../common/SearchInput';
 import { EmployeeForm } from '../employees/EmployeeForm';
+import type { ScopeRequest, ScopeResult } from '../../hooks/useScopedRecords';
 
 export interface PassSubmissionFormProps {
   employees: Employee[];
@@ -32,6 +33,9 @@ export interface PassSubmissionFormProps {
   logAction: (action: Omit<AppAction, 'id' | 'timestamp'>) => void;
   showToast: (msg: string, type?: 'success' | 'error') => void;
   allUsers?: UserProfile[];
+  // When given, `employees` / `passes` / `applications` hold only the records loaded so far
+  // (see useScopedRecords); the form asks for more as the picker is searched or a file imported.
+  loadScope?: (req: ScopeRequest) => Promise<ScopeResult>;
 }
 
 export function PassSubmissionForm({ 
@@ -50,7 +54,8 @@ export function PassSubmissionForm({
   initialData, 
   logAction, 
   showToast, 
-  allUsers 
+  allUsers,
+  loadScope
 }: PassSubmissionFormProps) {
   const [step, setStep] = useState(1);
   const [allApplicationMemberIds] = useState<string[]>(initialData?.employeeIds || []);
@@ -465,7 +470,9 @@ export function PassSubmissionForm({
       try {
         let freshEmp = createdEmp;
         if (!freshEmp) {
-          const freshEmployees: Employee[] = await apiFetch('/api/employees').then(res => res.json());
+          const freshEmployees: Employee[] = loadScope
+            ? (await loadScope({ identifiers: [prefilled.employeeId, prefilled.qidVisaNumber].filter(Boolean) as string[] })).employees
+            : await apiFetch('/api/employees').then(res => res.json());
           if (Array.isArray(freshEmployees) && freshEmployees.length > 0) {
             freshEmp = freshEmployees.find(e => 
               (prefilled.employeeId && e.employeeId === prefilled.employeeId) ||
@@ -477,6 +484,7 @@ export function PassSubmissionForm({
 
         if (freshEmp) {
           setLocallyCreatedEmployees(prev => [...prev, freshEmp]);
+          if (loadScope) loadScope({ employeeIds: [freshEmp.id] }).catch(() => { /* rules see them on the next refresh */ });
 
           if (importResults && 'unmatched' in importResults && Array.isArray((importResults as any).unmatched)) {
             const obj = importResults as any;
@@ -540,6 +548,14 @@ export function PassSubmissionForm({
     }
     setCreatingEmployeeRow(null);
   };
+
+  // Picker search: the server returns the matching people (with their passes / applications)
+  useEffect(() => {
+    if (!loadScope) return;
+    const t = setTimeout(() => { loadScope({ q: searchTerm }).catch(() => { /* keep current list */ }); }, searchTerm ? 250 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm]);
 
   const filteredEmployees = useMemo(() => {
     // Exclude inactive employees from the pass application picker
@@ -613,9 +629,23 @@ export function PassSubmissionForm({
     e.target.value = '';
   };
 
-  const proceedToReview = () => {
+  const proceedToReview = async () => {
     if (!rawImportData) return;
-    
+    // With scoped records, load the people named in the file before matching
+    let pool = allEmployees;
+    if (loadScope) {
+      const idents = rawImportData.flatMap(row => [row[mapping['qatarId']], row[mapping['visaNumber']], row[mapping['employeeId']]])
+        .filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(v => String(v).trim());
+      try {
+        const found = await loadScope({ identifiers: idents });
+        const have = new Set(pool.map(e => e.id));
+        pool = [...pool, ...found.employees.filter(e => !have.has(e.id))];
+      } catch (err: any) {
+        showToast(err.message || 'Failed to look up the people in the file', 'error');
+        return;
+      }
+    }
+        
     const matched: { 
       employee: Employee, 
       row: any,
@@ -628,8 +658,8 @@ export function PassSubmissionForm({
       const visaNumber = row[mapping['visaNumber']]?.toString();
       const staffNumber = row[mapping['employeeId']]?.toString();
 
-      const emp = allEmployees.find(e => 
-        (qatarId && (e.qatarId === qatarId || e.qidVisaNumber === qatarId)) || 
+      const emp = pool.find(e => 
+        (qatarId && (e.qatarId === qatarId || e.qidVisaNumber === qatarId)) ||  
         (visaNumber && (e.visaNumber === visaNumber || e.qidVisaNumber === visaNumber)) || 
         (staffNumber && e.employeeId === staffNumber)
       );

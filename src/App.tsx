@@ -54,8 +54,8 @@ const BIG_LIST_URL: Record<BigList, string> = { employees: '/api/employees', pas
 function listsForPath(path: string): BigList[] {
   if (['/', '/employees', '/resources', '/settings', '/audit', '/notifications'].includes(path)) return [];
   if (path.startsWith('/employees/')) return [];
-  // Lists and Pass Status use server queries; their application form asks for the lists when opened
-  if (path === '/applications' || path === '/status-management') return [];
+  // Applications, Application detail and Pass Status use server queries / scoped records
+  if (path.startsWith('/applications') || path === '/status-management') return [];
   if (path === '/matrix') return ['employees', 'passes'];
   return BIG_LISTS;
 }
@@ -900,8 +900,6 @@ export default function App() {
                 user?.role !== 'viewer' ? (
                   <Passes 
                     view="applications"
-                    formListsReady={BIG_LISTS.every(l => loadedLists[l])}
-                    onNeedFormLists={() => ensureLists(BIG_LISTS)}
                     passes={passes}
                     applications={applications}
                     employees={employees}
@@ -925,9 +923,6 @@ export default function App() {
               <Route path="/applications/:id" element={
                 user?.role !== 'viewer' ? (
                   <ApplicationDetail 
-                    applications={applications}
-                    passes={passes}
-                    employees={employees}
                     locations={locations}
                     categories={categories}
                     accessCodes={accessCodes}
@@ -949,8 +944,6 @@ export default function App() {
                 user?.role !== 'viewer' ? (
                   <Passes 
                     view="status-management"
-                    formListsReady={BIG_LISTS.every(l => loadedLists[l])}
-                    onNeedFormLists={() => ensureLists(BIG_LISTS)}
                     passes={passes}
                     applications={applications}
                     employees={employees}

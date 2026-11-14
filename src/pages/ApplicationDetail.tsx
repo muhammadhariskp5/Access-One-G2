@@ -26,11 +26,9 @@ import { PassDetails } from '../components/passes/PassDetails';
 import { WorkflowStageStepper } from '../components/passes/WorkflowStageStepper';
 import { StageSkipConfirmModal } from '../components/passes/StageSkipConfirmModal';
 import { PassSubmissionForm } from '../components/passes/PassSubmissionForm';
+import { useScopedRecords } from '../hooks/useScopedRecords';
 
 interface ApplicationDetailProps {
-  applications: PassApplication[];
-  passes: Pass[];
-  employees: Employee[];
   locations: Location[];
   categories: Category[];
   accessCodes: AccessCode[];
@@ -46,9 +44,6 @@ interface ApplicationDetailProps {
 }
 
 export function ApplicationDetail({
-  applications,
-  passes,
-  employees,
   locations,
   categories,
   accessCodes,
@@ -56,7 +51,7 @@ export function ApplicationDetail({
   divisions,
   departments,
   currentUser,
-  onSuccess,
+  onSuccess: parentOnSuccess,
   globalSearch = '',
   showToast,
   showConfirm,
@@ -65,6 +60,23 @@ export function ApplicationDetail({
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const locationRoute = useLocation();
+
+  // This workspace works on scoped records: the application, its people, and every pass and
+  // application of those people (plus people found by the pickers' searches). The rules below
+  // read these arrays exactly as they read the full lists before.
+  const scoped = useScopedRecords();
+  const { employees, passes, applications } = scoped;
+  const [isLoadingScope, setIsLoadingScope] = useState(true);
+  useEffect(() => {
+    if (!id) return;
+    setIsLoadingScope(true);
+    scoped.load({ applicationIds: [id] })
+      .catch(err => showToast(err.message || 'Failed to load application', 'error'))
+      .finally(() => setIsLoadingScope(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  // After a save here: refresh the app-wide lists and this workspace's records
+  const onSuccess = () => { parentOnSuccess(); scoped.refresh(); };
 
   const [auditHistory, setAuditHistory] = useState<ApplicationHistory[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -707,6 +719,15 @@ export function ApplicationDetail({
     );
   };
 
+  // The add / edit personnel pickers search the server (people found join the scoped records)
+  const pickerSearch = isAddPersonnelModalOpen ? addPersonnelSearch : (isEditAppModalOpen ? editPersonnelSearch : null);
+  useEffect(() => {
+    if (pickerSearch === null) return;
+    const t = setTimeout(() => { scoped.load({ q: pickerSearch.trim() }).catch(() => { /* keep current list */ }); }, pickerSearch ? 250 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickerSearch]);
+
   // Available employees for adding to this application
   const availableEmployeesToAdd = useMemo(() => {
     if (!application) return [];
@@ -1331,6 +1352,9 @@ export function ApplicationDetail({
     }
   };
 
+  if (!application && isLoadingScope) {
+    return <div className="p-12 text-center text-xs text-[#6B7280]">Loading…</div>;
+  }
   if (!application) {
     return (
       <div className="p-12 text-center bg-white rounded-3xl border border-[#E5E7EB]">
@@ -3511,6 +3535,7 @@ export function ApplicationDetail({
         >
           <PassSubmissionForm
             employees={employees}
+            loadScope={scoped.load}
             locations={locations}
             categories={categories}
             accessCodes={accessCodes}
