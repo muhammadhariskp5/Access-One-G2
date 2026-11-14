@@ -150,7 +150,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         const individualExpiries = req.body.individualExpiries || {};
         const validationData = {
           expiryDate: filteredBody.endDate,
-          parentPassId: filteredBody.parentPassId
+          parentPassId: filteredBody.parentPassId,
+          // checked against the application's own start date (not today)
+          startDate: filteredBody.startDate
         };
         await validatePassExpiries(connection, employeeIds, validationData, individualExpiries);
       } catch (err: any) {

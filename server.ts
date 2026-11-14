@@ -695,7 +695,17 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         const startDateStr = normalizeDateStr(filteredCommonData.startDate) || normalizeDateStr(new Date());
 
         if (startDateStr && effectiveCapDate < startDateStr) {
-          throw new Error(`${emp.NAME || 'Employee'}: Cannot issue pass because ${capReasonName} (${effectiveCapDate}) is before the requested Start Date (${startDateStr}). Please update ${capReasonName} first.`);
+          const dmy = (d: string) => `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}`;
+          const who = emp.NAME || 'Employee';
+          // Name the actual cause: the person's own pass dates, or a document / main pass / project
+          // date that limits them
+          if (!capReasonName) {
+            throw new Error(`${who}: the pass would end ${dmy(effectiveCapDate)}, before it starts (${dmy(startDateStr)}). Change this person's pass expiry (valid to) date in the form to a date after ${dmy(startDateStr)}.`);
+          }
+          const fix = capReasonName === 'QID/Visa Expiry' ? "Update the QID / visa expiry in the employee's details"
+            : capReasonName === 'Main Pass Expiry' ? 'Renew the main pass first, or issue a main pass instead'
+            : "Extend the project's end date (Settings > Projects)";
+          throw new Error(`${who}: the pass cannot start ${dmy(startDateStr)} because the ${capReasonName} is ${dmy(effectiveCapDate)}. ${fix}, then try again.`);
         }
 
         if (effectiveCapDate < reqDateStr) {
