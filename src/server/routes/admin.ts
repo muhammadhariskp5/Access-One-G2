@@ -444,32 +444,86 @@ export function registerAdminRoutes(app: express.Express, ctx: RouteContext) {
     }
   });
 
+  // Bulk import of access codes. Each row: { location | locationId (an ID, code or name of one of
+  // this organization's locations), areaCode, accessArea, description }. Valid rows are saved in one
+  // transaction; codes that already exist at that location are skipped; anything invalid is reported
+  // per row instead of failing the whole file. Returns { created, skipped, rejected, items }.
   app.post("/api/accessCodes/batch", authorize(['admin']), async (req, res) => {
     let connection;
     try {
       connection = await getConnection();
       const { orgId } = await getTenantOrgId(req, connection);
       const effectiveOrgId = orgId || 'org-habari';
-      const codes = Array.isArray(req.body) ? req.body : (req.body.accessCodes || []);
-      const newCodes = codes.map((code: any) => toOracleKeys({
-        ...code,
-        id: newId(),
-        organizationId: code.organizationId || effectiveOrgId
-      }));
+      const rows: any[] = Array.isArray(req.body) ? req.body : (req.body?.accessCodes || req.body?.rows || []);
+      if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: "No access codes to import" });
+      if (rows.length > 5000) return res.status(400).json({ error: "Too many rows (max 5000 per import)" });
+      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+      const g = (r: any, k: string) => r[k.toUpperCase()] ?? r[k] ?? null;
 
-      for (const code of newCodes) {
+      // This organization's locations, findable by ID, code or name
+      const locRes = await connection.execute(
+        `SELECT id, code, name FROM locations WHERE deletedAt IS NULL AND (organizationId = :orgId OR organizationId IS NULL)`,
+        { orgId: effectiveOrgId }, opts
+      );
+      const byKey = new Map<string, string>();
+      for (const l of (locRes.rows || []) as any[]) {
+        const id = String(g(l, 'id'));
+        byKey.set(`id:${id.toLowerCase()}`, id);
+        if (g(l, 'code')) byKey.set(`code:${String(g(l, 'code')).trim().toLowerCase()}`, id);
+        if (g(l, 'name')) byKey.set(`name:${String(g(l, 'name')).trim().toLowerCase()}`, id);
+      }
+      const resolveLocation = (v: unknown): string | null => {
+        const k = String(v ?? '').trim().toLowerCase();
+        if (!k) return null;
+        return byKey.get(`id:${k}`) || byKey.get(`code:${k}`) || byKey.get(`name:${k}`) || null;
+      };
+
+      // Codes already in use (per location)
+      const exRes = await connection.execute(
+        `SELECT locationId, areaCode FROM accessCodes WHERE deletedAt IS NULL AND (organizationId = :orgId OR organizationId IS NULL)`,
+        { orgId: effectiveOrgId }, opts
+      );
+      const taken = new Set(((exRes.rows || []) as any[]).map(r => `${g(r, 'locationId')}|${String(g(r, 'areaCode') || '').trim().toLowerCase()}`));
+
+      const text = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim());
+      const toInsert: any[] = [];
+      const skipped: { row: number; areaCode: string; reason: string }[] = [];
+      const rejected: { row: number; areaCode: string; reason: string }[] = [];
+      rows.forEach((r, i) => {
+        const rowNo = Number(r?.rowNumber) || i + 2;          // Excel row (header is row 1)
+        const areaCode = text(r?.areaCode);
+        const accessArea = text(r?.accessArea);
+        const description = text(r?.description);
+        const locRaw = r?.location ?? r?.locationId;
+        if (!areaCode || !accessArea) return rejected.push({ row: rowNo, areaCode, reason: 'Area code and access area are required' });
+        if (areaCode.length > 50) return rejected.push({ row: rowNo, areaCode, reason: 'Area code is longer than 50 characters' });
+        if (accessArea.length > 255) return rejected.push({ row: rowNo, areaCode, reason: 'Access area is longer than 255 characters' });
+        const locationId = resolveLocation(locRaw);
+        if (!locationId) return rejected.push({ row: rowNo, areaCode, reason: locRaw ? `Unknown location "${text(locRaw)}"` : 'No location given' });
+        const key = `${locationId}|${areaCode.toLowerCase()}`;
+        if (taken.has(key)) return skipped.push({ row: rowNo, areaCode, reason: 'Already exists at this location' });
+        taken.add(key);
+        toInsert.push({ id: newId(), areaCode, accessArea, description: description.slice(0, 1000), locationId, organizationId: effectiveOrgId });
+      });
+
+      for (const c of toInsert) {
         await connection.execute(
-          `INSERT INTO accessCodes (id, areaCode, accessArea, description, locationId, organizationId) VALUES (:ID, :AREACODE, :ACCESSAREA, :DESCRIPTION, :LOCATIONID, :ORGANIZATIONID)`,
-          code
+          `INSERT INTO accessCodes (id, areaCode, accessArea, description, locationId, organizationId, status)
+           VALUES (:id, :areaCode, :accessArea, :description, :locationId, :organizationId, 'active')`,
+          c
         );
       }
       await connection.commit();
 
-      logAction(req, 'BATCH_CREATE', 'access_code', 'batch', `Imported ${newCodes.length} access codes`);
-      res.json(newCodes.map(toCamelCase));
+      if (toInsert.length) logAction(req, 'BATCH_CREATE', 'access_code', 'batch', `Imported ${toInsert.length} access codes (${skipped.length} skipped, ${rejected.length} rejected)`);
+      res.status(toInsert.length === 0 && rejected.length > 0 ? 400 : 200).json({
+        created: toInsert.length, skipped, rejected, items: toInsert,
+        ...(toInsert.length === 0 && rejected.length > 0 ? { error: `No access codes imported: ${rejected.length} row(s) rejected` } : {}),
+      });
     } catch (err) {
       logger.error('Unhandled error', { err: err });
-      res.status(500).json({ error: "Failed to batch create access codes" });
+      if (connection) { try { await connection.rollback(); } catch { /* ignore */ } }
+      res.status(500).json({ error: "Failed to import access codes" });
     } finally {
       if (connection) await connection.close();
     }
