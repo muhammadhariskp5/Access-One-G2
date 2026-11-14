@@ -423,6 +423,16 @@ export default function App() {
       setLoadedLists(prev => ({ ...prev, [l]: true }));
     }));
   };
+  // The header search belongs to the page it was typed on: clear it when moving to another page
+  // (otherwise it silently filters e.g. an application's personnel table)
+  const lastPathRef = useRef(location.pathname);
+  useEffect(() => {
+    if (lastPathRef.current !== location.pathname) {
+      lastPathRef.current = location.pathname;
+      setGlobalSearch('');
+    }
+  }, [location.pathname]);
+
   const neededLists = listsForPath(location.pathname);
   const listsReady = neededLists.every(l => loadedLists[l]);
   useEffect(() => {

@@ -477,7 +477,39 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       );
       if (peopleChanged) {
         // (IDs of employees that don't exist are skipped, as before)
-        await savePeople(connection, req.params.id, mergePeople(await loadPeople(connection, req.params.id), req.body));
+        const before = await loadPeople(connection, req.params.id);
+        const after = mergePeople(before, req.body);
+        await savePeople(connection, req.params.id, after);
+
+        // People taken off the application: their passes on it end here (cancelled, kept for
+        // history, hidden from lists - as passes replaced by an edit are), and supplementary passes
+        // hanging off those main passes are cancelled too.
+        const kept = new Set(after.employeeIds);
+        const removed = before.employeeIds.filter(e => !kept.has(e));
+        const nowIso = new Date().toISOString();
+        for (const empId of removed) {
+          const live = await connection.execute(
+            `SELECT id FROM passes WHERE requestId = :reqId AND employeeId = :empId AND deletedAt IS NULL`,
+            { reqId: req.params.id, empId }, { outFormat: oracledb.OUT_FORMAT_OBJECT }
+          );
+          const passIds = ((live.rows || []) as any[]).map(r => String(r.ID ?? r.id));
+          if (passIds.length === 0) continue;
+          await connection.execute(
+            `UPDATE passes SET status = 'cancelled', deletedAt = :now, updatedAt = :now,
+                    remarks = SUBSTR(COALESCE(remarks, '') || ' [Removed from application]', 1, 1000)
+              WHERE requestId = :reqId AND employeeId = :empId AND deletedAt IS NULL`,
+            { now: nowIso, reqId: req.params.id, empId }
+          );
+          for (const pid of passIds) {
+            await connection.execute(
+              `UPDATE passes SET status = 'cancelled', updatedAt = :now,
+                      remarks = SUBSTR(COALESCE(remarks, '') || ' [Main pass cancelled: holder removed from application]', 1, 1000)
+                WHERE parentPassId = :pid AND deletedAt IS NULL
+                  AND LOWER(COALESCE(status, '')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired', 'replaced')`,
+              { now: nowIso, pid }
+            );
+          }
+        }
       }
 
       // Trigger defined sub-process effect if application status was updated

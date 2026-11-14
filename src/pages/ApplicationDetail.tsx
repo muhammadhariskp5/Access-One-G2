@@ -1154,9 +1154,12 @@ export function ApplicationDetail({
 
   const handleRemovePersonnel = (empId: string, empName: string) => {
     if (!application) return;
+    const livePass = appPasses.find(p => p.employeeId === empId &&
+      !['cancelled', 'revoked', 'rejected', 'expired', 'replaced'].includes(String(p.status || '').toLowerCase()));
     showConfirm(
       "Remove Personnel",
-      `Are you sure you want to remove ${empName} from this application?`,
+      `Are you sure you want to remove ${empName} from this application?` +
+        (livePass ? ` Their pass on this application (${livePass.passNumber || livePass.id}) will be cancelled, along with any supplementary passes linked to it.` : ''),
       async () => {
         try {
           const updatedEmpIds = (application.employeeIds || []).filter(id => id !== empId);

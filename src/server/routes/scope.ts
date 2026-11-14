@@ -63,6 +63,10 @@ export function registerScopeRoutes(app: express.Express, ctx: RouteContext) {
         for (const r of await inChunks(askedAppIds, inList => `SELECT employeeId FROM passRequestEmployees WHERE requestId IN (${inList})`)) {
           people.add(String(g(r, 'employeeId')));
         }
+        // ...and anyone holding a live pass on those applications (shown on the roster too)
+        for (const r of await inChunks(askedAppIds, inList => `SELECT DISTINCT p.employeeId FROM passes p WHERE p.requestId IN (${inList}) AND p.deletedAt IS NULL`)) {
+          if (g(r, 'employeeId')) people.add(String(g(r, 'employeeId')));
+        }
       }
       if (identifiers.length) {
         for (const r of await inChunks(identifiers, inList => `SELECT e.id FROM employees e WHERE e.deletedAt IS NULL${org('e')}
