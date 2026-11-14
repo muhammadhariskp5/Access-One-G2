@@ -112,10 +112,12 @@ export async function attachPeople<T extends { id: string }>(connection: any, ap
   return apps;
 }
 
-// While true, saves also write the people into passRequests' old JSON columns, so the previous
-// release still reads correct data if it is ever rolled back to. Turn off (and later drop the
-// columns) once this release has settled.
-export const KEEP_JSON_COPY = true;
+// The people used to live in passRequests' JSON columns (employeeIds, employeeStatuses,
+// individualExpiries, individualStartDates). Since 2026-11-14 the link table is the only record and
+// nothing reads those columns. They are no longer written (false) and are kept as a frozen backup of
+// how every application stood at switch-off; they can be dropped later. Set true only to write them
+// again (e.g. before rolling back to a release older than the link-table change).
+export const KEEP_JSON_COPY = false;
 
 // Who is on one application, with their own status and dates (from the link table).
 export async function loadPeople(connection: any, requestId: string): Promise<AppPeople> {

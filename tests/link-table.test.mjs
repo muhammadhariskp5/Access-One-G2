@@ -1,5 +1,5 @@
 // The link table (passRequestEmployees) is the record of who is on each application: API reads come
-// from it, saves write it (and, for rollback safety, also keep the old JSON columns in step).
+// from it and saves write it; the old JSON columns are left untouched as a frozen backup.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, client, openDb, tempDbPath, OWNER } from './helpers.mjs';
@@ -41,7 +41,7 @@ test('a new application: one link row per person, in list order, with own dates'
   assert.deepEqual(rows.map(r => r.employeeId), [ids.Cee, ids.Ay, ids.Bee]);
   assert.equal(rows.find(r => r.employeeId === ids.Ay).expiryDate, '2029-06-30');
   assert.equal(rows.find(r => r.employeeId === ids.Bee).startDate, '2026-12-01');
-  assert.deepEqual(JSON.parse(json.employeeIds), [ids.Cee, ids.Ay, ids.Bee]);   // JSON copy kept in step
+  assert.equal(json.employeeIds ?? null, null);                                 // old JSON columns no longer written
   const app = await getApp();
   assert.deepEqual(app.employeeIds, [ids.Cee, ids.Ay, ids.Bee]);
   assert.equal(app.individualExpiries[ids.Ay], '2029-06-30');
@@ -69,7 +69,7 @@ test('editing people writes the link table (removal, new order, statuses)', asyn
   assert.deepEqual(rows.map(r => r.employeeId), [ids.Bee, ids.Cee]);
   assert.equal(rows.find(r => r.employeeId === ids.Cee).status, 'processing');
   assert.equal(rows.find(r => r.employeeId === ids.Bee).status, null);     // follows the application
-  assert.deepEqual(JSON.parse(json.employeeIds), [ids.Bee, ids.Cee]);
+  assert.equal(json.employeeIds, '["ghost"]');                                 // backup columns stay frozen
   const app = await getApp();
   assert.deepEqual(app.employeeIds, [ids.Bee, ids.Cee]);
   assert.equal(app.employeeStatuses[ids.Cee], 'processing');
