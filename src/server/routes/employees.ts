@@ -544,9 +544,19 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
     try {
       connection = await getConnection();
 
-      // Selection only check
+      // Division / department / project must be valid when they are changed. A value already stored
+      // (e.g. an old typo) doesn't block saving other fields; the form flags it for correction.
       try {
-        await validateEmployeeReferences(connection, req.body);
+        const cur = await connection.execute(
+          `SELECT division, department, project FROM employees WHERE id = :id`, { id: req.params.id },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        const row: any = cur.rows?.[0] || {};
+        const same = (field: string) => String(row[field.toUpperCase()] ?? row[field] ?? '').trim().toLowerCase() === String(req.body[field] ?? '').trim().toLowerCase();
+        const changed: Record<string, unknown> = {};
+        for (const f of ['division', 'department', 'project']) {
+          if (req.body[f] !== undefined && !same(f)) changed[f] = req.body[f];
+        }
+        await validateEmployeeReferences(connection, changed);
       } catch (err: any) {
         return res.status(400).json({ error: err.message });
       }

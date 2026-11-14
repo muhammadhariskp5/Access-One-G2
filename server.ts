@@ -10,7 +10,7 @@ import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees, loadPeople, savePeople } from "./src/server/requestLinks.ts";
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
 import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
-import { normalizeDate, normalizeStoredDates } from "./src/server/dates.ts";
+import { normalizeDate, normalizeStoredDates, repairEmployeeDates } from "./src/server/dates.ts";
 import { relinkEmployeeReferences } from "./src/server/relink.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
@@ -1709,6 +1709,16 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         const r = await relinkEmployeeReferences(conn);
         logger.info(`[Migration] re-linked ${r.passes} passes and ${r.applications} applications; ${r.unresolved} references could not be matched`);
         await enforceForeignKeys(conn, getDbEngine());
+      }
+    },
+    {
+      // Employee document dates an old import stored wrongly (an Excel date number saved as the
+      // year, e.g. "31-12-46261" for 27-08-2026): converted to the real date, so these employees
+      // can be edited again (the edit form's date check rejected them)
+      id: '2026-11-14-repair-employee-dates',
+      run: async (conn) => {
+        const r = await repairEmployeeDates(conn);
+        logger.info(`[Migration] employee dates repaired: ${r.fixed} converted, ${r.cleared} unreadable cleared`);
       }
     }
   ];

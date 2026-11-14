@@ -15,14 +15,45 @@ interface EmployeeFormProps {
 export function EmployeeForm({ employee, divisions, departments, projects, onClose, onSuccess }: EmployeeFormProps) {
   const [data, setData] = useState<Partial<Employee>>(() => {
     if (!employee) return { status: 'active', employeeType: 'Internal' };
+    // Every date as YYYY-MM-DD; a stored value that can't be a real date (e.g. a spreadsheet number
+    // saved as a year) shows empty so it can be re-entered, instead of blocking the save.
+    const date = (v: unknown) => {
+      const d = parseToYMD(v as string);
+      const y = d ? Number(d.slice(0, 4)) : 0;
+      return d && y >= 1900 && y <= 2200 ? d : '';
+    };
     return {
       ...employee,
-      passportExpiry: parseToYMD(employee.passportExpiry) || '',
-      qidVisaExpiry: parseToYMD(employee.qidVisaExpiry || employee.visaExpiry) || '',
-      safetyInductionDate: parseToYMD(employee.safetyInductionDate) || ''
-    };
+      passportExpiry: date(employee.passportExpiry),
+      qidVisaExpiry: date(employee.qidVisaExpiry || employee.visaExpiry),
+      visaExpiry: date(employee.visaExpiry),
+      safetyInductionDate: date(employee.safetyInductionDate),
+      ...('birthDate' in (employee as any) ? { birthDate: date((employee as any).birthDate) } : {})
+    } as Partial<Employee>;
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // A stored division / department / project that isn't in today's list (e.g. an old typo) is shown
+  // as a flagged choice instead of a blank dropdown; the same name in other capitals is matched.
+  const listMatch = (value: unknown, names: string[]) =>
+    names.find(n => n.toLowerCase() === String(value ?? '').trim().toLowerCase());
+  const notInList = (value: unknown, names: string[]) =>
+    !!String(value ?? '').trim() && !listMatch(value, names);
+  React.useEffect(() => {
+    setData(prev => ({
+      ...prev,
+      division: (listMatch(prev.division, divisions.map(d => d.name)) ?? prev.division) as any,
+      department: listMatch(prev.department, departments.map(d => d.name)) ?? prev.department,
+      project: listMatch(prev.project, projects.map(p => p.name)) ?? prev.project,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [divisions, departments, projects]);
+  const flagged = (value: unknown, names: string[]) => notInList(value, names) ? (
+    <option value={String(value)}>⚠ {String(value)} (not in list)</option>
+  ) : null;
+  const flagNote = (value: unknown, names: string[], what: string) => notInList(value, names) ? (
+    <p className="text-[10px] text-amber-700 font-semibold">"{String(value)}" is not a {what} in the list. Please choose the correct one.</p>
+  ) : null;
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -219,10 +250,12 @@ export function EmployeeForm({ employee, divisions, departments, projects, onClo
             className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-sm bg-white"
           >
             <option value="">Select Division...</option>
+            {flagged(data.division, divisions.map(d => d.name))}
             {divisions.map(div => (
               <option key={div.id} value={div.name}>{div.name}</option>
             ))}
           </select>
+          {flagNote(data.division, divisions.map(d => d.name), 'division')}
         </div>
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Department</label>
@@ -232,10 +265,12 @@ export function EmployeeForm({ employee, divisions, departments, projects, onClo
             className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-sm bg-white"
           >
             <option value="">Select Department...</option>
+            {flagged(data.department, departments.map(d => d.name))}
             {departments.map(dept => (
               <option key={dept.id} value={dept.name}>{dept.name}</option>
             ))}
           </select>
+          {flagNote(data.department, departments.map(d => d.name), 'department')}
         </div>
       </div>
 
@@ -248,10 +283,12 @@ export function EmployeeForm({ employee, divisions, departments, projects, onClo
             className="w-full px-4 py-3 rounded-xl border border-[#E5E7EB] outline-none focus:border-[#800020] font-medium text-sm bg-white"
           >
             <option value="">Select Project...</option>
+            {flagged(data.project, projects.map(p => p.name))}
             {projects.map(proj => (
               <option key={proj.id} value={proj.name}>{proj.name}</option>
             ))}
           </select>
+          {flagNote(data.project, projects.map(p => p.name), 'project')}
         </div>
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-[#6B7280] uppercase tracking-wider">Job Title</label>

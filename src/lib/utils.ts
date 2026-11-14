@@ -163,6 +163,10 @@ export const apiFetch = async (url: string, options: any = {}) => {
           if (contentType.includes('application/json')) {
             const errorData = await clonedRes.json();
             errorMsg = errorData?.error || errorData?.message || errorMsg;
+            // Validation errors name the fields: show them ("Invalid request: qidVisaExpiry must be a date ...")
+            if (Array.isArray(errorData?.fields) && errorData.fields.length) {
+              errorMsg += ': ' + errorData.fields.map((f: any) => `${f.field} ${f.message}`).join('; ');
+            }
           } else {
             const text = await clonedRes.text();
             if (text.trim().startsWith('<!doctype') || text.trim().startsWith('<html')) {
