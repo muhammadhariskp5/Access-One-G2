@@ -730,7 +730,8 @@ export function PassApplicationsView({
                             const rawStatus = app.employeeStatuses?.[empId] || app.status || 'pending';
                             const resolved = resolvePersonnelStatus(rawStatus, empPass?.status, app.status);
 
-                            // Resolve stage-specific badge style
+                            // Stage colour, shown as a small dot beside the status text
+                            let stageDotClass = "bg-gray-400";
                             let stageBadgeClass = "bg-gray-50 text-gray-700 border border-gray-200";
                             if (resolved.statusKey === 'cancelled' || resolved.statusKey === 'rejected') {
                               stageBadgeClass = "bg-rose-50 text-rose-700 border border-rose-200";
@@ -746,6 +747,12 @@ export function PassApplicationsView({
                               stageBadgeClass = "bg-amber-50 text-amber-700 border border-amber-200";
                             }
 
+                            if (stageBadgeClass.includes('rose')) stageDotClass = 'bg-rose-500';
+                            else if (stageBadgeClass.includes('emerald')) stageDotClass = 'bg-emerald-500';
+                            else if (stageBadgeClass.includes('teal')) stageDotClass = 'bg-teal-500';
+                            else if (stageBadgeClass.includes('indigo')) stageDotClass = 'bg-indigo-500';
+                            else if (stageBadgeClass.includes('blue')) stageDotClass = 'bg-blue-500';
+                            else if (stageBadgeClass.includes('amber')) stageDotClass = 'bg-amber-500';
                             const indExp = (app.individualExpiries as any)?.[empId];
                             const indStart = (app.individualStartDates as any)?.[empId];
                             const startVal = indStart || empPass?.startDate || app.startDate || app.createdAt;
@@ -777,7 +784,8 @@ export function PassApplicationsView({
                                   if (colId === 'status') {
                                     return (
                                       <td key={colId} className="p-3">
-                                        <span className={cn("px-2 py-0.5 rounded text-[10px] font-bold uppercase", stageBadgeClass)}>
+                                        <span className="inline-flex items-center gap-1.5 text-xs text-gray-700 whitespace-nowrap">
+                                          <span className={cn("w-2 h-2 rounded-full shrink-0", stageDotClass)} />
                                           {resolved.label}
                                         </span>
                                       </td>
@@ -807,17 +815,13 @@ export function PassApplicationsView({
                                   }
                                   if (colId === 'passNo') {
                                     return (
-                                      <td key={colId} className="p-3 font-bold">
-                                        {empPass?.passNumber ? (
-                                          <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
-                                            #{empPass.passNumber}
-                                          </span>
-                                        ) : empPass?.id ? (
-                                          <span className="px-2 py-0.5 bg-[#800020]/10 text-[#800020] rounded text-xs font-bold border border-[#800020]/20">
-                                            #{empPass.id.toUpperCase()}
+                                      <td key={colId} className="p-3">
+                                        {empPass?.passNumber || empPass?.id ? (
+                                          <span className="font-mono text-xs text-gray-800">
+                                            {empPass.passNumber || empPass.id.toUpperCase()}
                                           </span>
                                         ) : (
-                                          <span className="text-gray-400 font-normal italic">Pending Issue</span>
+                                          <span className="text-xs text-gray-400">Not issued</span>
                                         )}
                                       </td>
                                     );

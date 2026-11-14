@@ -2038,17 +2038,13 @@ export function ApplicationDetail({
                         </td>
 
                         {/* Pass # Column */}
-                        <td className="p-3.5 font-bold">
-                          {item.pass?.passNumber ? (
-                            <span className="px-2.5 py-1 bg-[#800020]/10 text-[#800020] rounded-lg text-xs font-extrabold border border-[#800020]/20">
-                              #{item.pass.passNumber}
-                            </span>
-                          ) : item.pass?.id ? (
-                            <span className="px-2.5 py-1 bg-[#800020]/10 text-[#800020] rounded-lg text-xs font-extrabold border border-[#800020]/20">
-                              #{item.pass.id.toUpperCase()}
+                        <td className="p-3.5">
+                          {item.pass?.passNumber || item.pass?.id ? (
+                            <span className="font-mono text-xs text-gray-800">
+                              {item.pass.passNumber || item.pass.id.toUpperCase()}
                             </span>
                           ) : (
-                            <span className="text-gray-400 font-normal italic">Pending Issue</span>
+                            <span className="text-xs text-gray-400">Not issued</span>
                           )}
                         </td>
 
@@ -2065,8 +2061,8 @@ export function ApplicationDetail({
 
                             return (
                               <>
-                                <div className="flex items-center gap-1.5 text-xs text-gray-900 font-bold whitespace-nowrap">
-                                  <Calendar size={13} className="text-[#800020] shrink-0" />
+                                <div className="flex items-center gap-1.5 text-xs text-gray-700 whitespace-nowrap">
+                                  <Calendar size={12} className="text-gray-400 shrink-0" />
                                   <span>
                                     {startFmt !== '-' && endFmt !== '-'
                                       ? `${startFmt} to ${endFmt}`
@@ -2087,17 +2083,22 @@ export function ApplicationDetail({
 
                         {/* Member Status Badge */}
                         <td className="p-3.5">
-                          <span className={cn(
-                            "px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1",
-                            item.status === 'collected' || item.status === 'active' || item.status === 'completed' 
-                              ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
-                              : item.status === 'accepted' || item.status === 'approved'
-                              ? "bg-indigo-100 text-indigo-800 border border-indigo-300"
-                              : item.status === 'pending' || item.status === 'processing'
-                              ? "bg-amber-100 text-amber-800 border border-amber-300"
-                              : "bg-rose-100 text-rose-800 border border-rose-300"
-                          )}>
-                            <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                          {/* Plain status: a coloured dot and normal text (no filled badge) */}
+                          <span className="inline-flex items-center gap-1.5 text-xs text-gray-700 whitespace-nowrap">
+                            <span className={cn(
+                              "w-2 h-2 rounded-full shrink-0",
+                              item.status === 'collected' || item.status === 'active' || item.status === 'completed'
+                                ? "bg-emerald-500"
+                                : item.status === 'issued' || item.status === 'ready_for_collection'
+                                ? "bg-teal-500"
+                                : item.status === 'accepted' || item.status === 'approved'
+                                ? "bg-indigo-500"
+                                : item.status === 'processing' || item.status === 'under_processing'
+                                ? "bg-blue-500"
+                                : item.status === 'pending' || item.status === 'under_review'
+                                ? "bg-amber-500"
+                                : "bg-rose-500"
+                            )} />
                             {item.status === 'collected' ? 'Collected / Active' : (item.statusLabel || item.status)}
                           </span>
                         </td>
