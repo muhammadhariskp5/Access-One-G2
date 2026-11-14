@@ -1,6 +1,7 @@
 import express from "express";
 import { logger } from "../log.ts";
 import { ymd } from "../passQuery.ts";
+import { parseApplicationListQuery, buildApplicationList, applicationTabClause, ROLLUP } from "../applicationQuery.ts";
 import { businessToday, addDays } from "../businessDate.ts";
 import type { RouteContext } from "../context.ts";
 
@@ -10,8 +11,6 @@ import type { RouteContext } from "../context.ts";
 
 // Passes counted as active on the dashboard
 const ACTIVE_PASS = ['active', 'collected', 'completed', 'approved'];
-// Applications no longer in progress (completed + history statuses, as utils/passStatus.ts)
-const CLOSED_APP = ['completed', 'expired', 'replaced', 'superseded', 'revoked', 'cancelled', 'rejected', 'archived', 'inactive', 'deleted'];
 const LIST_CAP = 200;
 const inList = (xs: string[]) => xs.map(s => `'${s}'`).join(', ');
 
@@ -38,14 +37,12 @@ export function registerDashboardRoutes(app: express.Express, ctx: RouteContext)
       const in30 = addDays(today, 30);
       const exp = ymd('p.expiryDate');
       const activePass = `LOWER(p.status) IN (${inList(ACTIVE_PASS)})`;
-      const openApp = `LOWER(COALESCE(r.status, '~')) NOT IN (${inList(CLOSED_APP)})`;
 
       // Counts
       const [counts] = await rows(`
         SELECT (SELECT COUNT(*) FROM employees e WHERE e.deletedAt IS NULL${org('e')}) AS employeeCount,
                (SELECT COUNT(*) FROM passes p WHERE p.deletedAt IS NULL${org('p')}) AS totalPassCount,
-               (SELECT COUNT(*) FROM passes p WHERE p.deletedAt IS NULL AND ${activePass}${org('p')}) AS activePassCount,
-               (SELECT COUNT(*) FROM passRequests r WHERE r.deletedAt IS NULL AND ${openApp}${org('r')}) AS activeApplicationCount
+               (SELECT COUNT(*) FROM passes p WHERE p.deletedAt IS NULL AND ${activePass}${org('p')}) AS activePassCount
           FROM ${engine === 'oracle' ? 'dual' : '(SELECT 1 AS one) d'}`);
 
       // Applications: in progress (capped) and the five newest submissions (optionally searched)
@@ -54,8 +51,15 @@ export function registerDashboardRoutes(app: express.Express, ctx: RouteContext)
         COALESCE(u.displayName, u.email) AS requesterName,
         (SELECT COUNT(*) FROM passRequestEmployees pre WHERE pre.requestId = r.id) AS employeeCount`;
       const appFrom = `passRequests r LEFT JOIN locations l ON l.id = r.locationId LEFT JOIN users u ON u.id = r.requesterId`;
-      const activeApps = await rows(`SELECT ${appCols} FROM ${appFrom}
-        WHERE r.deletedAt IS NULL AND ${openApp}${org('r')} ORDER BY r.createdAt DESC, r.id DESC ${cap(LIST_CAP)}`);
+      // In progress = the Applications screen's "Active" tab: decided by each application's overall
+      // status, rolled up from its people and passes (not the stored status, which can lag behind -
+      // e.g. still "issued" after everyone has collected)
+      const act = buildApplicationList(parseApplicationListQuery({ tab: 'active' }), orgId || null);
+      const actWhere = `${act.where}${applicationTabClause(parseApplicationListQuery({ tab: 'active' }))}`;
+      const [actCount] = ((await connection.execute(`SELECT COUNT(*) AS n FROM ${act.from} WHERE ${actWhere}`, act.binds, opts)).rows || []) as any[];
+      const activeApps = ((await connection.execute(
+        `SELECT ${appCols.replace('r.status AS status', `${ROLLUP} AS status`)} FROM ${act.from} LEFT JOIN users u ON u.id = r.requesterId
+          WHERE ${actWhere} ORDER BY r.createdAt DESC, r.id DESC ${cap(LIST_CAP)}`, act.binds, opts)).rows || []) as any[];
       const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 200).toLowerCase() : '';
       const qb: Record<string, unknown> = {};
       let qWhere = '';
@@ -105,7 +109,7 @@ export function registerDashboardRoutes(app: express.Express, ctx: RouteContext)
         employeeCount: num(counts, 'employeeCount'),
         totalPassCount: num(counts, 'totalPassCount'),
         activePassCount: num(counts, 'activePassCount'),
-        activeApplicationCount: num(counts, 'activeApplicationCount'),
+        activeApplicationCount: num(actCount, 'n'),
         activeApplications: activeApps.map(mapApp),
         recentApplications: recentApps.map(mapApp),
         expiring48hCount: num(exp48, 'n'),

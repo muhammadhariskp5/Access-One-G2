@@ -28,7 +28,11 @@ before(async () => {
   db.run(`INSERT INTO passRequests (id, locationId, status, type, employeeIds, organizationId, createdAt) VALUES
     ('APP1', 'L1', 'pending', 'main', '["E1","E2"]', '${H}', '2026-10-03T00:00:00Z'),
     ('APP2', 'L2', 'completed', 'main', '["E1"]', '${H}', '2026-10-02T00:00:00Z'),
-    ('APP3', 'L2', 'expired', 'supplementary', '["E2"]', '${H}', '2026-10-01T00:00:00Z')`);
+    ('APP3', 'L2', 'expired', 'supplementary', '["E2"]', '${H}', '2026-10-01T00:00:00Z'),
+    ('APP4', 'L1', 'issued', 'main', '["E2"]', '${H}', '2026-09-01T00:00:00Z')`);
+  // APP4 still says "issued" but its only person has collected: it is completed, not in progress
+  db.run(`INSERT INTO passes (id, requestId, employeeId, locationId, status, passNumber, expiryDate, organizationId, createdAt) VALUES
+    ('P9', 'APP4', 'E2', 'L1', 'collected', 'PN-9', '${plus(200)}', '${H}', '2026-09-02')`);
   db.run(`DELETE FROM passRequestEmployees`);
   db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-13-pass-list-expiry-and-indexes'`);
   db.save();
@@ -48,8 +52,8 @@ after(async () => { await srv?.stop(); });
 
 test('counts: live employees, active passes, in-progress applications, own org only', () => {
   assert.equal(d.employeeCount, 2);
-  assert.equal(d.totalPassCount, 4);
-  assert.equal(d.activePassCount, 3);
+  assert.equal(d.totalPassCount, 5);
+  assert.equal(d.activePassCount, 4);
   assert.equal(d.activeApplicationCount, 1);
   assert.deepEqual(d.activeApplications.map(a => a.id), ['APP1']);
   assert.equal(d.activeApplications[0].employeeCount, 2);
@@ -62,11 +66,11 @@ test('expiring: next 48h listed with names, next 30 days grouped (any stored dat
   assert.equal(d.expiringSoonCount, 2);
   assert.deepEqual(d.expiringByLocation, [['Alpha Gate', 2]]);
   assert.deepEqual(d.expiringByCategory, [['Ports', 2]]);
-  assert.deepEqual(d.activeByLocation, { L1: 2, L2: 1 });
+  assert.deepEqual(d.activeByLocation, { L1: 3, L2: 1 });
 });
 
 test('recent activity: five newest submissions, searchable', async () => {
-  assert.deepEqual(d.recentApplications.map(a => a.id), ['APP1', 'APP2', 'APP3']);
+  assert.deepEqual(d.recentApplications.map(a => a.id), ['APP1', 'APP2', 'APP3', 'APP4']);
   const r = await admin.get('/api/dashboard?q=zulu');
   assert.deepEqual(r.body.recentApplications.map(a => a.id), ['APP2', 'APP3']);
 });

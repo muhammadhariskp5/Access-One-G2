@@ -101,7 +101,7 @@ const LIVE = `(${T} - ${X})`;
 const RAW = `LOWER(COALESCE(r.status, '~'))`;
 
 // computeApplicationRollupStatus
-const ROLLUP = `(CASE
+export const ROLLUP = `(CASE
     WHEN ${RAW} IN ('archived', 'rejected', 'cancelled', 'replaced', 'expired') THEN ${RAW}
     WHEN ${LIVE} > 0 AND ${C} = ${LIVE} THEN 'completed'
     WHEN ${LIVE} > 0 AND ${C} + ${I} = ${LIVE} THEN 'issued'
