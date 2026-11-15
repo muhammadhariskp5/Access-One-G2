@@ -1,4 +1,5 @@
-// Pass lifecycle: daily job expires passes by business date, closes application lines,
+// Pass lifecycle: the daily job never writes 'expired' onto passes (their date decides); it closes
+// application lines of passes past their date,
 // preserves end reasons, rebuilds employee links, and runs at most once per day.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -56,9 +57,9 @@ before(async () => {
   rows.jobRuns = check.rows(`SELECT id, status FROM jobRuns`);
 });
 
-test('passes past their date are expired; valid ones are untouched', () => {
-  assert.equal(rows.passes.T_P1, 'expired');
-  assert.equal(rows.passes.T_P2, 'expired');
+test('nothing is written to a pass because its date passed (expiry is read from the date)', () => {
+  assert.equal(rows.passes.T_P1, 'active');
+  assert.equal(rows.passes.T_P2, 'issued');
   assert.equal(rows.passes.T_P3, 'issued');
 });
 

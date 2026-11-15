@@ -1,4 +1,5 @@
 import express from "express";
+import { withEffectiveStatus } from "../passValidity.ts";
 import { logger } from "../log.ts";
 import { ymd } from "../passQuery.ts";
 import { pageClause } from "../employeeQuery.ts";
@@ -12,7 +13,8 @@ import type { RouteContext } from "../context.ts";
 //   valid    - status active/collected/completed/received, not replaced, not expired
 //   expired  - status 'expired' or expiry date before today
 //   replaced - status replaced/superseded, or remarks mention "replaced"
-//   recent   - expired within the user's window (Settings > Display), not replaced/revoked/cancelled
+//   recent   - expiry date passed within the user's window (Settings > Display), not
+//              replaced/revoked/cancelled. Validity comes from dates; a status only ends a pass early.
 //   in range - the date-range filter (isPassInDateRange)
 // Each row comes with all of that person's live passes; the screen builds its cells from them as
 // before. GET /api/matrix?page=&pageSize=&q=&status=&category=&from=&to=&sort=&order=&expiredDays=
@@ -75,8 +77,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
             const replaced = ['replaced', 'superseded'].includes(st) || rm.includes('replaced');
             const expired = st === 'expired' || (!!exp && exp < today);
             const valid = ['active', 'collected', 'completed', 'received'].includes(st) && !replaced && !expired;
-            const ended = exp && exp < today ? exp : (normalizeDate(g(p, 'updatedAt')) || exp);   // ended early: when it was changed
-            const recent = expired && !replaced && !['revoked', 'cancelled', 'rejected', 'draft'].includes(st) && !!ended && ended >= cutoff;
+            const recent = expired && !replaced && !['revoked', 'cancelled', 'rejected', 'draft'].includes(st) && !!exp && exp < today && exp >= cutoff;
             return {
               id: g(p, 'id'), passNumber: g(p, 'passNumber'), status: g(p, 'status'), type: g(p, 'type'),
               location: g(p, 'locationName'), parentPassId: g(p, 'parentPassId'), lastChanged: g(p, 'updatedAt'), remarks: g(p, 'remarks'),
@@ -131,7 +132,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
       if (showsRecent) binds.cutoff = addDays(today, -expiredDays);
       const RECENT = showsRecent
         ? `(${EXPIRED} AND NOT ${REPL} AND ${st} NOT IN ('revoked', 'cancelled', 'rejected', 'draft')
-            AND (CASE WHEN ${exp} IS NOT NULL AND ${exp} < :today THEN ${exp} ELSE ${ymd('p.updatedAt')} END) >= :cutoff)`
+            AND ${exp} IS NOT NULL AND ${exp} < :today AND ${exp} >= :cutoff)`
         : `(1 = 0)`;
       let IN_RANGE = '1 = 1';
       if (from) { binds.dFrom = from; IN_RANGE += ` AND NOT (${ymd('COALESCE(p.expiryDate, p.endDate)')} IS NOT NULL AND ${ymd('COALESCE(p.expiryDate, p.endDate)')} < :dFrom)`; }
@@ -196,7 +197,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
           pb, opts
         );
         for (const p of (pr.rows || []) as any[]) {
-          const mapped = { ...toCamelCase(p), accessCodes: (() => { try { return JSON.parse(p.ACCESSCODES || p.accessCodes || '[]'); } catch { return []; } })(), authorityAppNumber: p.AUTHORITYAPPNUMBER ?? p.authorityAppNumber ?? null };
+          const mapped = withEffectiveStatus({ ...toCamelCase(p), accessCodes: (() => { try { return JSON.parse(p.ACCESSCODES || p.accessCodes || '[]'); } catch { return []; } })(), authorityAppNumber: p.AUTHORITYAPPNUMBER ?? p.authorityAppNumber ?? null }, today);
           byEmp.get(String(mapped.employeeId))?.push(mapped);
         }
       }

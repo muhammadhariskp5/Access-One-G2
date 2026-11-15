@@ -1,4 +1,5 @@
 import express from "express";
+import { isValidPassSql } from "../passValidity.ts";
 import { logger } from "../log.ts";
 import { ymd } from "../passQuery.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, ROLLUP } from "../applicationQuery.ts";
@@ -9,10 +10,7 @@ import type { RouteContext } from "../context.ts";
 // Everything the dashboard shows, computed by the database in one request (counts, the short
 // lists, per-location totals), so the browser doesn't need the full employee/pass/application lists.
 
-// Passes counted as active on the dashboard
-const ACTIVE_PASS = ['active', 'collected', 'completed', 'approved'];
 const LIST_CAP = 200;
-const inList = (xs: string[]) => xs.map(s => `'${s}'`).join(', ');
 
 export function registerDashboardRoutes(app: express.Express, ctx: RouteContext) {
   const { oracledb, authorize, getConnection, getTenantOrgId, getDbEngine } = ctx;
@@ -36,7 +34,8 @@ export function registerDashboardRoutes(app: express.Express, ctx: RouteContext)
       const in2 = addDays(today, 2);
       const in30 = addDays(today, 30);
       const exp = ymd('p.expiryDate');
-      const activePass = `LOWER(p.status) IN (${inList(ACTIVE_PASS)})`;
+      // Valid: a live status and not past its expiry date (today is a generated YYYY-MM-DD)
+      const activePass = isValidPassSql('p', `'${today}'`);
 
       // Counts
       const [counts] = await rows(`

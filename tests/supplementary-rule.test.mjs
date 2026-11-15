@@ -51,7 +51,7 @@ before(async () => {
 after(async () => { await srv?.stop(); });
 
 test('main pass cancelled and no other valid main: the supplementary ends', () => {
-  assert.equal(s0.S1.status, 'expired');
+  assert.equal(s0.S1.status, 'cancelled');
 });
 
 test('main pass replaced but another valid main exists: the supplementary moves to it', () => {
@@ -62,7 +62,7 @@ test('main pass replaced but another valid main exists: the supplementary moves 
 test('a supplementary with no main pass linked: linked if one is valid, ended if not', () => {
   assert.equal(s0.S3.status, 'active');
   assert.equal(s0.S3.parentPassId, 'M3');
-  assert.equal(s0.S4.status, 'expired');
+  assert.equal(s0.S4.status, 'cancelled');
 });
 
 test('a valid pair is left alone', () => {
@@ -75,5 +75,5 @@ test('ending a main pass through Pass Status (rejected) ends its supplementary a
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const s = await states();
   assert.equal(s.M5.status, 'rejected');
-  assert.ok(['rejected', 'expired'].includes(s.S5.status), s.S5.status);   // ended with its main pass
+  assert.ok(['rejected', 'cancelled'].includes(s.S5.status), s.S5.status);   // ended with its main pass
 });

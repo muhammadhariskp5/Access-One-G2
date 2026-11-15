@@ -1,4 +1,5 @@
 import express from "express";
+import { withEffectiveStatus } from "../passValidity.ts";
 import { logger } from "../log.ts";
 import { attachPeople } from "../requestLinks.ts";
 import type { RouteContext } from "../context.ts";
@@ -98,7 +99,7 @@ export function registerScopeRoutes(app: express.Express, ctx: RouteContext) {
       const addPasses = (rows: any[]) => rows.forEach(p => passRows.set(String(g(p, 'id')), p));
       if (personIds.length) addPasses(await inChunks(personIds, inList => `SELECT * FROM passes p WHERE p.employeeId IN (${inList}) AND p.deletedAt IS NULL${org('p')}`, orgBind));
       if (askedAppIds.length) addPasses(await inChunks(askedAppIds, inList => `SELECT * FROM passes p WHERE p.requestId IN (${inList}) AND p.deletedAt IS NULL${org('p')}`, orgBind));
-      const passes = Array.from(passRows.values()).map(p => ({
+      const passes = Array.from(passRows.values()).map(p => withEffectiveStatus({
         ...toCamelCase(p),
         accessCodes: (() => { try { return JSON.parse(p.ACCESSCODES || p.accessCodes || '[]'); } catch { return []; } })(),
         authorityAppNumber: g(p, 'authorityAppNumber'),

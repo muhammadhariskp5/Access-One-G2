@@ -37,9 +37,9 @@ before(async () => {
     ('P_P', 'REPL', 'L1', 'main', 'replaced', '${plus(100)}', '[]', NULL, '${H}', '2026-01-01', '2026-01-01'),
     ('P_X', 'OTHER', 'L1', 'main', 'active', '${plus(100)}', '[]', NULL, 'org-elsewhere', '2026-01-01', '2026-01-01'),
     ('P_D', 'ODD', 'L1', 'main', ' Active ', '1/5/2099', '[]', NULL, '${H}', '2026-01-01', '2026-01-01'),
-    -- ended early (marked expired, expiry still in the future): long ago / 3 days ago
-    ('P_EO', 'EARLYOLD', 'L1', 'main', 'expired', '${plus(300)}', '[]', NULL, '${H}', '2026-01-01', '${plus(-200)}'),
-    ('P_EN', 'EARLYNEW', 'L1', 'main', 'expired', '${plus(300)}', '[]', NULL, '${H}', '2026-01-01', '${plus(-3)}')`);
+    -- ended early by a decision (revoked / cancelled), expiry still in the future
+    ('P_EO', 'EARLYOLD', 'L1', 'main', 'revoked', '${plus(300)}', '[]', NULL, '${H}', '2026-01-01', '${plus(-200)}'),
+    ('P_EN', 'EARLYNEW', 'L1', 'main', 'cancelled', '${plus(300)}', '[]', NULL, '${H}', '2026-01-01', '${plus(-3)}')`);
   // One-digit day/month date, stored before dates were normalized: the migration converts it
   db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-14-normalize-dates'`);
   db.save();
@@ -55,13 +55,13 @@ before(async () => {
 after(async () => { await srv?.stop(); });
 
 test('default view: valid passes, plus expiries within the window; own org only', async () => {
-  assert.deepEqual(await ids('page=1&status=active&expiredDays=30'), ['VALID', 'RECENT', 'ODD', 'EARLYNEW']);   // ended early: counted from when it was ended
+  assert.deepEqual(await ids('page=1&status=active&expiredDays=30'), ['VALID', 'RECENT', 'ODD']);   // ended early (revoked/cancelled): gone at once
   assert.deepEqual(await ids('page=1&status=active&expiredDays=0'), ['VALID', 'ODD']);       // window off
-  assert.deepEqual(await ids('page=1&status=active&expiredDays=365'), ['VALID', 'RECENT', 'OLDEXP', 'ODD', 'EARLYOLD', 'EARLYNEW']);
+  assert.deepEqual(await ids('page=1&status=active&expiredDays=365'), ['VALID', 'RECENT', 'OLDEXP', 'ODD']);
 });
 
 test('other status views', async () => {
-  assert.deepEqual(await ids('page=1&status=expired'), ['RECENT', 'OLDEXP', 'EARLYOLD', 'EARLYNEW']);
+  assert.deepEqual(await ids('page=1&status=expired'), ['RECENT', 'OLDEXP']);   // expiry comes from the date
   assert.deepEqual(await ids('page=1&status=replaced'), ['REPL']);
   assert.deepEqual(await ids('page=1&status=no_valid_pass'), ['RECENT', 'OLDEXP', 'REPL', 'NOPASS', 'EARLYOLD', 'EARLYNEW']);
   assert.deepEqual(await ids('page=1&status=all_records'), ['VALID', 'RECENT', 'OLDEXP', 'REPL', 'ODD', 'EARLYOLD', 'EARLYNEW']);
@@ -78,7 +78,7 @@ test('date range, sort, paging; each row carries its passes', async () => {
   assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL', 'ODD', 'EARLYOLD', 'EARLYNEW']);
   assert.deepEqual(await ids('page=1&status=all_records&sort=name&order=desc'), ['EARLYNEW', 'EARLYOLD', 'ODD', 'REPL', 'OLDEXP', 'RECENT', 'VALID']);
   const p2 = await admin.get('/api/matrix?page=2&pageSize=1&status=active&expiredDays=30');
-  assert.equal(p2.body.total, 4);
+  assert.equal(p2.body.total, 3);
   assert.deepEqual(p2.body.items.map(e => e.id), ['RECENT']);
   assert.deepEqual(p2.body.items[0].passes.map(p => p.id), ['P_R']);
   assert.deepEqual(p2.body.items[0].passes[0].accessCodes, []);

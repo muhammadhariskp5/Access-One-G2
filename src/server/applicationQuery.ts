@@ -6,6 +6,8 @@
 // decide the overall status and whether it belongs under Active or History. Every input is
 // whitelisted or bound.
 import { STATUS_GROUPS, ymd } from './passQuery.ts';
+import { effectiveStatusSql } from './passValidity.ts';
+import { businessToday } from './businessDate.ts';
 
 export const APP_PAGE_SIZE_MAX = 200;
 export const APP_EXPORT_MAX = 20000;
@@ -64,6 +66,7 @@ const LINE_STAGE = `CASE
 // Stage counts per application, over the link table and each person's latest live pass on it.
 function stageCounts(orgId: string | null, binds: Record<string, unknown>): string {
   if (orgId) binds.orgId = orgId;
+  binds.today = businessToday();   // a live pass past its expiry date counts as expired
   const reqOrg = orgId ? ' AND r2.organizationId = :orgId' : '';
   const passOrg = orgId ? ' AND p.organizationId = :orgId' : '';
   const n = (k: string) => `SUM(CASE WHEN st.k = '${k}' THEN 1 ELSE 0 END)`;
@@ -79,7 +82,7 @@ function stageCounts(orgId: string | null, binds: Record<string, unknown>): stri
               FROM passRequestEmployees pre
               JOIN passRequests r2 ON r2.id = pre.requestId
               LEFT JOIN (
-                SELECT p.requestId AS requestId, p.employeeId AS employeeId, LOWER(TRIM(p.status)) AS ps,
+                SELECT p.requestId AS requestId, p.employeeId AS employeeId, LOWER(TRIM(${effectiveStatusSql('p')})) AS ps,
                        ROW_NUMBER() OVER (PARTITION BY p.requestId, p.employeeId ORDER BY p.createdAt DESC, p.id DESC) AS rn
                   FROM passes p
                  WHERE p.deletedAt IS NULL AND p.requestId IS NOT NULL${passOrg}

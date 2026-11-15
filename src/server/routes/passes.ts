@@ -1,10 +1,13 @@
 import express from "express";
+import { withEffectiveStatus, effectiveStatus } from "../passValidity.ts";
+import { businessToday } from "../businessDate.ts";
+import { normalizeDate } from "../dates.ts";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
 import { findMissingEmployees, loadPeople, savePeople } from "../requestLinks.ts";
-import { mainPassConflict } from "../mainPassRule.ts";
+import { mainPassConflict, supplementaryParentMissing } from "../mainPassRule.ts";
 import { settleSupplementaries } from "../supplementaryRule.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
@@ -48,7 +51,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         return res.json({ items, total, page: f.all ? 1 : f.page, pageSize: limit });
       }
 
-      const mapPass = (p: any) => ({
+      const mapPass = (p: any) => withEffectiveStatus({
         ...toCamelCase(p),
         accessCodes: JSON.parse(p.ACCESSCODES || '[]'),
         authorityAppNumber: p.AUTHORITYAPPNUMBER
@@ -331,6 +334,11 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         const conflict = await mainPassConflict(connection, employeeId, locationId);
         if (conflict) return res.status(409).json({ error: conflict });
       }
+      // A supplementary pass made valid needs a valid main pass in the category
+      if (type === 'supplementary' && ['active', 'collected', 'completed', 'received'].includes(String(req.body.status || '').toLowerCase())) {
+        const missing = await supplementaryParentMissing(connection, employeeId, locationId);
+        if (missing) return res.status(409).json({ error: missing });
+      }
 
       // Strict Expiry Validation
       try {
@@ -437,6 +445,24 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       // Parse JSON fields from DB
       oldPass.accessCodes = JSON.parse(rawPass.ACCESSCODES || '[]');
 
+      // Expiry comes from the expiry date, never from a status set by hand. The edit form sends
+      // back the status it was shown ('expired' for a pass past its date): that is no change.
+      const today = businessToday();
+      const storedStatus = String(oldPass.status || '').trim().toLowerCase();
+      if (String(req.body.status ?? '').trim().toLowerCase() === 'expired') {
+        if (storedStatus === 'expired' || effectiveStatus(oldPass.status, oldPass.expiryDate, today) === 'expired') {
+          delete req.body.status;
+        } else {
+          return res.status(400).json({ error: "A pass expires on its expiry date; it can't be set to Expired. To end it early, set it to Cancelled or Revoked." });
+        }
+      }
+      // A pass stored as 'expired' (older versions wrote it when the date passed) whose expiry date
+      // is corrected to today or later is valid again
+      const correctedExpiry = normalizeDate(req.body.expiryDate);
+      if (storedStatus === 'expired' && req.body.status === undefined && correctedExpiry && correctedExpiry >= today) {
+        req.body.status = 'active';
+      }
+
       const updatedPass = { ...oldPass, ...req.body };
 
       // A main pass becoming valid (or moving site) must not give the person a second valid one
@@ -446,6 +472,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       if (String(updatedPass.type || '').toLowerCase() === 'main' && becomesLive) {
         const conflict = await mainPassConflict(connection, updatedPass.employeeId, updatedPass.locationId, { excludePassId: oldPass.id });
         if (conflict) return res.status(409).json({ error: conflict });
+      }
+      if (String(updatedPass.type || '').toLowerCase() === 'supplementary' && becomesLive) {
+        const missing = await supplementaryParentMissing(connection, updatedPass.employeeId, updatedPass.locationId);
+        if (missing) return res.status(409).json({ error: missing });
       }
 
       // Auto-generate Pass Number when status becomes active
@@ -509,9 +539,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           };
         });
 
-      const otherActivePasses = allPasses.filter((p: any) => 
-        p.id !== updatedPass.id && 
-        ['active', 'received'].includes(p.status)
+      // Other valid passes there (not deleted, a live status, not past their expiry date)
+      const otherActivePasses = allPasses.filter((p: any) =>
+        p.id !== updatedPass.id && !p.deletedat && !p.deletedAt &&
+        ['active', 'collected', 'completed', 'received'].includes(String(effectiveStatus(p.status, p.expiryDate, today)).toLowerCase())
       );
 
       const duplicatePass = otherActivePasses.find((p: any) => 
@@ -528,36 +559,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           }
         }
 
-        // Synchronize expiry dates to the earliest among all active/received passes for this location
-        const allRelevantPasses = [updatedPass, ...otherActivePasses];
-        let earliestExpiry: Date | null = null;
-
-        allRelevantPasses.forEach((p: any) => {
-          const expiryDate = p.expiryDate;
-          if (expiryDate) {
-            const d = new Date(expiryDate);
-            if (!earliestExpiry || d < earliestExpiry) {
-              earliestExpiry = d;
-            }
-          }
-        });
-
-        if (earliestExpiry) {
-          const earliestExpiryStr = earliestExpiry.toISOString();
-          updatedPass.expiryDate = earliestExpiryStr;
-
-          // Update other passes in the DB
-          for (const p of otherActivePasses) {
-            await connection.execute(
-              `UPDATE passes SET expiryDate = :expiryDate WHERE id = :id`,
-              { expiryDate: earliestExpiryStr, id: p.id }
-            );
-          }
-        }
+        // (Other passes' expiry dates are never rewritten here: each pass keeps its own date.)
       }
 
       // Update the pass itself
-      if (updatedPass.expiryDate) updates.EXPIRYDATE = updatedPass.expiryDate;
       if (updates.ACCESSCODES) {
         updates.ACCESSCODES = JSON.stringify(updates.ACCESSCODES);
       }
@@ -629,6 +634,9 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       connection = await getConnection();
       const { passIds, status, remarks, handoverBy } = req.body;
       if (!Array.isArray(passIds)) return res.status(400).json({ error: "passIds must be an array" });
+      if (String(status || '').trim().toLowerCase() === 'expired') {
+        return res.status(400).json({ error: "A pass expires on its expiry date; it can't be set to Expired. To end passes early, set them to Cancelled or Revoked." });
+      }
 
       const updatedAt = new Date().toISOString();
       const finalStatuses = ['cancelled', 'revoked', 'rejected', 'expired'];
@@ -640,14 +648,24 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       // Making main passes valid must not give anyone a second valid one: check all before writing
       const LIVE = ['active', 'collected', 'completed', 'received'];
       if (LIVE.includes(String(targetPassStatus || '').toLowerCase())) {
+        const rows: any[] = [];
         for (const id of passIds) {
-          const pr = await connection.execute(`SELECT employeeId, locationId, type, status FROM passes WHERE id = :id`, [id], { outFormat: oracledb.OUT_FORMAT_OBJECT });
-          const p: any = pr.rows?.[0];
-          if (!p) continue;
-          const g = (k: string) => p[k.toUpperCase()] ?? p[k];
-          if (String(g('type') || '').toLowerCase() !== 'main' || LIVE.includes(String(g('status') || '').toLowerCase())) continue;
-          const conflict = await mainPassConflict(connection, g('employeeId'), g('locationId'), { excludePassId: id });
-          if (conflict) return res.status(409).json({ error: conflict });
+          const pr = await connection.execute(`SELECT id, employeeId, locationId, type, status FROM passes WHERE id = :id`, [id], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          if (pr.rows?.[0]) rows.push(pr.rows[0]);
+        }
+        const gv = (p: any, k: string) => p[k.toUpperCase()] ?? p[k];
+        const mainIds = rows.filter(p => String(gv(p, 'type') || '').toLowerCase() === 'main').map(p => String(gv(p, 'id')));
+        for (const p of rows) {
+          if (LIVE.includes(String(gv(p, 'status') || '').toLowerCase())) continue;
+          const type = String(gv(p, 'type') || '').toLowerCase();
+          if (type === 'main') {
+            const conflict = await mainPassConflict(connection, gv(p, 'employeeId'), gv(p, 'locationId'), { excludePassId: gv(p, 'id') });
+            if (conflict) return res.status(409).json({ error: conflict });
+          } else if (type === 'supplementary') {
+            // Its main pass may be activated in this same action
+            const missing = await supplementaryParentMissing(connection, gv(p, 'employeeId'), gv(p, 'locationId'), mainIds);
+            if (missing) return res.status(409).json({ error: missing });
+          }
         }
       }
 

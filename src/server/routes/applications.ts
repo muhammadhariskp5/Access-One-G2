@@ -13,7 +13,7 @@ import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
 import { pageClause } from "../employeeQuery.ts";
-import { enforceOneMainPassPerCategory, mainPassConflict } from "../mainPassRule.ts";
+import { enforceOneMainPassPerCategory, mainPassConflict, supplementaryParentMissing } from "../mainPassRule.ts";
 import { settleSupplementaries } from "../supplementaryRule.ts";
 import { respondDelta } from "../syncStamp.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
@@ -26,11 +26,21 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
   // it is created or people are added (while they hold one), and when it is collected. The
   // application's own passes don't count. Returns the refusal message, or null.
   const ACTIVATING = ['collected', 'completed', 'active'];
-  const appMainConflict = async (connection: any, appRow: any, employeeIds: string[], override: { type?: string; locationId?: string } = {}) => {
+  // activating = the passes are being collected / made active now
+  const appMainConflict = async (connection: any, appRow: any, employeeIds: string[], override: { type?: string; locationId?: string } = {}, activating = false) => {
     const g = (k: string) => appRow?.[k.toUpperCase()] ?? appRow?.[k] ?? null;
     const type = String(override.type || g('type') || 'main').toLowerCase();
-    if (type !== 'main') return null;
     const locationId = override.locationId || g('locationId');
+    if (type === 'supplementary') {
+      // A supplementary pass needs a valid main pass in the category before it can be collected
+      if (!activating) return null;
+      for (const empId of employeeIds) {
+        const missing = await supplementaryParentMissing(connection, empId, locationId);
+        if (missing) return missing;
+      }
+      return null;
+    }
+    if (type !== 'main') return null;
     for (const empId of employeeIds) {
       const conflict = await mainPassConflict(connection, empId, locationId, { excludeRequestId: g('id') });
       if (conflict) return conflict;
@@ -677,7 +687,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
 
       if (ACTIVATING.includes(String(status || '').toLowerCase())) {
         const ppl = await loadPeople(connection, String(application.ID ?? application.id));
-        const conflict = await appMainConflict(connection, application, ppl.employeeIds);
+        // People still on the application (not cancelled / rejected / replaced on it)
+        const onIt = ppl.employeeIds.filter(id => !['cancelled', 'rejected', 'replaced'].includes(String(ppl.employeeStatuses[id] || '').toLowerCase()));
+        const conflict = await appMainConflict(connection, application, onIt, {}, true);
         if (conflict) return res.status(409).json({ error: conflict });
       }
 
@@ -894,7 +906,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const allEmployeeIds = people.employeeIds;
 
       if (['collected', 'completed'].includes(String(status || '').toLowerCase())) {
-        const conflict = await appMainConflict(connection, application, (employeeIds || []).map(String));
+        const conflict = await appMainConflict(connection, application, (employeeIds || []).map(String), {}, true);
         if (conflict) return res.status(409).json({ error: conflict });
       }
 
@@ -977,11 +989,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       if (effectiveStatus === 'collected' || effectiveStatus === 'completed') {
         const locId = application.LOCATIONID;
         for (const empId of (employeeIds || [])) {
-          await connection.execute(
-            `UPDATE passes SET status = 'expired', updatedAt = :updatedAt WHERE employeeId = :employeeId AND locationId = :locationId AND status = 'active' AND UPPER(requestId) != UPPER(:requestId)`,
-            { updatedAt: now, employeeId: empId, locationId: locId, requestId: req.params.id }
-          );
-
+          // Collecting a pass never ends the person's other passes here. A main pass renewal retires
+          // the old main pass (as 'replaced') below; a supplementary pass leaves the main pass alone.
           await connection.execute(
             `UPDATE passes SET status = :passStatus, handoverBy = :handoverBy, updatedAt = :updatedAt WHERE UPPER(requestId) = UPPER(:requestId) AND employeeId = :employeeId`,
             { passStatus: status === 'collected' ? 'collected' : 'active', handoverBy: handoverBy || null, updatedAt: now, requestId: req.params.id, employeeId: empId }
@@ -1108,6 +1117,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
         logger.error("Failed to insert request history", { err: hErr });
       }
 
+      // Supplementary passes of these people follow their main pass (linked to a valid one, or ended)
+      await settleSupplementaries(connection, (employeeIds || []).map(String));
+
       await connection.commit();
 
       // Dispatch in-app notification to requester
@@ -1158,7 +1170,7 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const employeeIds = people.employeeIds;
 
       if (['collected', 'completed'].includes(String(req.body.status || '').toLowerCase())) {
-        const conflict = await appMainConflict(connection, application, [req.params.employeeId]);
+        const conflict = await appMainConflict(connection, application, [req.params.employeeId], {}, true);
         if (conflict) return res.status(409).json({ error: conflict });
       }
 

@@ -1,4 +1,5 @@
 import express from "express";
+import { withEffectiveStatus } from "../passValidity.ts";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -197,7 +198,7 @@ export function registerEmployeeRoutes(app: express.Express, ctx: RouteContext) 
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
 
-      const passes = passesResult.rows?.map((p: any) => ({
+      const passes = passesResult.rows?.map((p: any) => withEffectiveStatus({
         ...toCamelCase(p),
         accessCodes: JSON.parse(p.ACCESSCODES || '[]')
       })) || [];

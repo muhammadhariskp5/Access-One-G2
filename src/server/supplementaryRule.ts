@@ -1,8 +1,10 @@
 // --- A supplementary pass is valid only while its person holds a valid main pass in the category ---
 // For each valid supplementary pass (of the given people, or everyone): if its main pass is no longer
 // valid - ended by any status, past its date, deleted - or it has none, it is re-linked to that
-// person's valid main pass in the same category when there is one; otherwise it ends ('expired',
-// with a note). Runs after a main pass changes status, daily, and once for existing data.
+// person's valid main pass in the same category when there is one; otherwise it ends the way its
+// main pass ended (revoked -> revoked, replaced -> replaced, otherwise cancelled), with a note.
+// Its own expiry date is never changed, and it is never set to 'expired' - expiry comes from dates.
+// Runs after a main pass changes status, daily, and once for existing data.
 import { normalizeDate } from './dates.ts';
 import { businessToday } from './businessDate.ts';
 import { logger } from './log.ts';
@@ -61,10 +63,19 @@ export async function settleSupplementaries(conn: any, employeeIds: string[] | n
       await conn.execute(`UPDATE passes SET parentPassId = :m, updatedAt = :now WHERE id = :id`, { m: g(m, 'id'), now, id: g(s, 'id') });
       relinked++;
     } else {
+      // How its main pass ended decides how it ends
+      let parentStatus = '';
+      if (parent) {
+        const pr = ((await conn.execute(`SELECT status FROM passes WHERE id = :id`, { id: parent }, opts)).rows || []) as any[];
+        parentStatus = String(g(pr[0] || {}, 'status') || '').trim().toLowerCase();
+      }
+      const status = parentStatus === 'revoked' ? 'revoked'
+        : ['replaced', 'superseded'].includes(parentStatus) ? 'replaced'
+        : 'cancelled';
       await conn.execute(
-        `UPDATE passes SET status = 'expired', updatedAt = :now,
+        `UPDATE passes SET status = :status, updatedAt = :now,
                 remarks = SUBSTR(COALESCE(remarks, '') || ' [Ended: no valid main pass in this category]', 1, 1000)
-          WHERE id = :id`, { now, id: g(s, 'id') });
+          WHERE id = :id`, { status, now, id: g(s, 'id') });
       ended++;
       logger.info('[SupplementaryRule] supplementary ended: no valid main pass in its category', { pass: g(s, 'passNumber') || g(s, 'id') });
     }

@@ -9,7 +9,9 @@ import crypto from "crypto";
 import { debugLog, logger } from "./src/server/log.ts";
 import { syncRequestEmployees, loadPeople, savePeople } from "./src/server/requestLinks.ts";
 import { installSyncStamps, checkSyncStamps } from "./src/server/syncStamp.ts";
-import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
+import { businessToday, addDays, BUSINESS_TZ } from "./src/server/businessDate.ts";
+import { isValidPassSql, effectiveStatus, effectiveStatusSql } from "./src/server/passValidity.ts";
+import { ymd } from "./src/server/passQuery.ts";
 import { normalizeDate, normalizeStoredDates, repairEmployeeDates } from "./src/server/dates.ts";
 import { relinkEmployeeReferences } from "./src/server/relink.ts";
 import { enforceOneMainPassPerCategory } from "./src/server/mainPassRule.ts";
@@ -199,21 +201,26 @@ async function notifyAdmins(connection: any, orgId: string | null | undefined, p
 // Sends expiry reminders. It never changes pass status: expiry is decided only by the daily
 // lifecycle job (business-date based). `expiredAt` = the timestamp that job stamped on the passes
 // it just expired, so exactly those get an "expired" notice (no flood of historical ones).
-async function scanPassExpiries(connection: any, expiredAt?: string): Promise<number> {
+async function scanPassExpiries(connection: any, notifyExpired = false): Promise<number> {
   let createdCount = 0;
-  const now = new Date();
-  const nowStr = now.toISOString();
-  const twoDaysLater = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString();
-  const sevenDaysLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-  const thirtyDaysLater = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  // Business dates (YYYY-MM-DD); a pass is valid through its expiry date
+  const today = businessToday();
+  const twoDaysLater = addDays(today, 2);
+  const sevenDaysLater = addDays(today, 7);
+  const thirtyDaysLater = addDays(today, 30);
+  const exp = ymd('p.expiryDate');
+  // Valid passes (a live status - active or collected - and not deleted)
+  const live = `p.deletedAt IS NULL AND ${isValidPassSql('p')} AND ${exp} IS NOT NULL`;
 
   try {
-    // 1. Passes the daily job has just expired
-    const expiredRes = expiredAt ? await connection.execute(
+    // 1. Passes whose expiry date has just passed (last 3 days, so a missed day is caught up
+    //    without a flood of old ones). Nothing is written to the pass: expiry comes from its date.
+    const expiredRes = notifyExpired ? await connection.execute(
       `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
-       WHERE p.status = 'expired' AND p.updatedAt = :expiredAt
+       WHERE p.deletedAt IS NULL AND LOWER(TRIM(COALESCE(p.status, '~'))) IN ('active', 'collected', 'completed', 'received')
+       AND ${exp} < :today AND ${exp} >= :since
        AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expired')`,
-      { expiredAt },
+      { today, since: addDays(today, -3) },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     ) : { rows: [] };
     for (const pass of (expiredRes.rows || []) as any[]) {
@@ -225,7 +232,7 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       await notifyAdmins(connection, orgId, {
         type: 'expired',
         title: `Pass Expired: ${pNum}`,
-        message: `Pass #${pNum} expired on ${expDate}. Status has been updated to expired.`,
+        message: `Pass #${pNum} expired on ${expDate}.`,
         entityType: 'pass',
         entityId: pId,
         link: '/status-management',
@@ -237,10 +244,9 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     // 2. Passes expiring in 48 hours
     const urgent48Res = await connection.execute(
       `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
-       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
-       AND p.expiryDate <= :twoDaysLater AND p.expiryDate >= :nowStr
+       WHERE ${live} AND ${exp} <= :twoDaysLater
        AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_48h')`,
-      { twoDaysLater, nowStr },
+      { today, twoDaysLater },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     for (const pass of (urgent48Res.rows || []) as any[]) {
@@ -264,10 +270,9 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     // 3. Passes expiring in 7 days
     const warn7Res = await connection.execute(
       `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
-       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
-       AND p.expiryDate <= :sevenDaysLater AND p.expiryDate > :twoDaysLater
+       WHERE ${live} AND ${exp} <= :sevenDaysLater AND ${exp} > :twoDaysLater
        AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_7d')`,
-      { sevenDaysLater, twoDaysLater },
+      { today, sevenDaysLater, twoDaysLater },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     for (const pass of (warn7Res.rows || []) as any[]) {
@@ -291,10 +296,9 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     // 4. Passes expiring in 30 days
     const notice30Res = await connection.execute(
       `SELECT p.id, p.passNumber, p.employeeId, p.organizationId, p.expiryDate FROM passes p
-       WHERE p.status = 'active' AND p.expiryDate IS NOT NULL 
-       AND p.expiryDate <= :thirtyDaysLater AND p.expiryDate > :sevenDaysLater
+       WHERE ${live} AND ${exp} <= :thirtyDaysLater AND ${exp} > :sevenDaysLater
        AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.entityType = 'pass' AND n.entityId = p.id AND n.type = 'expiring_30d')`,
-      { thirtyDaysLater, sevenDaysLater },
+      { today, thirtyDaysLater, sevenDaysLater },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     for (const pass of (notice30Res.rows || []) as any[]) {
@@ -1347,11 +1351,13 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       ids.forEach((id, i) => { binds[`r${i}`] = id.toUpperCase(); });
       scope = ` AND UPPER(r.id) IN (${ids.map((_, i) => `:r${i}`).join(', ')})`;
     }
+    // A pass's status as of today: a live pass past its expiry date counts as expired
+    const today = businessToday();
     const appsRes = await connection.execute(
       `SELECT r.id, r.status FROM passRequests r
        WHERE LOWER(r.status) NOT IN (${closedList})${scope}
        AND EXISTS (SELECT 1 FROM passes p WHERE UPPER(p.requestId) = UPPER(r.id)
-                   AND LOWER(p.status) IN ('expired', 'replaced', 'superseded', 'revoked'))`,
+                   AND LOWER(${effectiveStatusSql('p', `'${today}'`)}) IN ('expired', 'replaced', 'superseded', 'revoked'))`,
       binds,
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
@@ -1363,21 +1369,21 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       const statuses: Record<string, string> = { ...people.employeeStatuses };
 
       const passRes = await connection.execute(
-        `SELECT employeeId, status, updatedAt FROM passes WHERE UPPER(requestId) = UPPER(:id)`,
+        `SELECT employeeId, status, expiryDate, createdAt, id FROM passes WHERE UPPER(requestId) = UPPER(:id) AND deletedAt IS NULL`,
         [appId],
         { outFormat: oracledb.OUT_FORMAT_OBJECT }
       );
-      // Latest pass state per employee on this application
+      // Latest pass per employee on this application (newest created), status as of today
       const passStateByEmp: Record<string, string> = {};
-      const passUpdatedByEmp: Record<string, string> = {};
+      const passCreatedByEmp: Record<string, string> = {};
       for (const p of (passRes.rows || []) as any[]) {
         const empId = p.EMPLOYEEID || p.employeeId;
-        const st = String(p.STATUS || p.status || '').toLowerCase();
-        const upd = String(p.UPDATEDAT || p.updatedAt || '');
+        const st = effectiveStatus(p.STATUS || p.status, p.EXPIRYDATE || p.expiryDate, today).toLowerCase();
+        const created = `${p.CREATEDAT || p.createdAt || ''}|${p.ID || p.id || ''}`;
         if (!empId) continue;
-        if (!passUpdatedByEmp[empId] || upd > passUpdatedByEmp[empId]) {
+        if (!passCreatedByEmp[empId] || created > passCreatedByEmp[empId]) {
           passStateByEmp[empId] = st;
-          passUpdatedByEmp[empId] = upd;
+          passCreatedByEmp[empId] = created;
         }
       }
 
@@ -1444,7 +1450,6 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
     const runId = `${DAILY_JOB}:${today}`;
     const now = new Date().toISOString();
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-    const terminalList = TERMINAL_PASS_STATUSES.map(s => `'${s}'`).join(', ');
     let connection;
     try {
       connection = await getConnection();
@@ -1470,26 +1475,19 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         const datesFixed = await normalizeStoredDates(connection);
         if (datesFixed > 0) logger.info(`[DailyJob] ${today}: ${datesFixed} stored dates converted to YYYY-MM-DD`);
 
-        // 2. Expire live passes whose last valid day (business calendar) has passed.
-        //    Terminal statuses are never overwritten, so the real end reason (revoked/replaced/cancelled) is kept.
-        const expiredMain = await connection.execute(
-          `UPDATE passes SET status = 'expired', updatedAt = :now
-           WHERE LOWER(status) NOT IN (${terminalList})
-           AND expiryDate IS NOT NULL AND SUBSTR(expiryDate, 1, 10) < :today`,
-          { now, today }
-        );
+        // 2. Passes are NOT marked expired here: a pass expires by its date, worked out whenever it
+        //    is read (passValidity.ts). Nothing about a pass is written just because a day passed.
 
-        // 3. Supplementary passes without a valid main pass in their category: re-linked to the
-        //    person's other valid main pass there, or ended (any end of the main pass, not just expiry)
+        // 3. Supplementary passes without a valid main pass in their category (e.g. the main pass
+        //    reached its date): re-linked to the person's other valid main pass there, or ended
         const supp = await settleSupplementaries(connection, null);
-        const expiredCount = (expiredMain?.rowsAffected || 0) + supp.ended;
 
-        // 4. Close application lines / applications for passes that just expired
-        const appsClosed = expiredCount > 0 ? await closeApplicationsForEndedPasses(connection, now) : 0;
+        // 4. Close application lines / applications whose passes have ended (by date or decision)
+        const appsClosed = await closeApplicationsForEndedPasses(connection, now);
 
-        // Expiry reminders (30 / 7 / 2 days ahead) and "expired" notices for passes expired above
+        // Expiry reminders (30 / 7 / 2 days ahead) and "expired" notices for passes past their date
         try {
-          await scanPassExpiries(connection, now);
+          await scanPassExpiries(connection, true);
         } catch (notifErr) {
           logger.error('[DailyJob] scanPassExpiries failed', { err: notifErr });
         }
@@ -1509,9 +1507,9 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         );
         await connection.commit();
 
-        logger.info(`[DailyJob] ${today}: ${expiredCount} passes expired, ${appsClosed} applications updated, ${archived?.rowsAffected || 0} archived.`);
-        const changedLists: string[] = [];
-        if (expiredCount > 0) changedLists.push('passes');
+        logger.info(`[DailyJob] ${today}: ${supp.ended} supplementary passes ended, ${supp.relinked} re-linked, ${appsClosed} applications updated, ${archived?.rowsAffected || 0} archived.`);
+        // A new day changes which passes are valid: every screen refreshes its passes
+        const changedLists: string[] = ['passes'];
         if (appsClosed > 0 || (archived?.rowsAffected || 0) > 0) changedLists.push('passApplications');
         publishChange(changedLists, null);
         flushNotificationPushes();
@@ -1750,6 +1748,64 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       run: async (conn) => {
         const r = await settleSupplementaries(conn, null);
         logger.info(`[Migration] supplementary passes: ${r.relinked} re-linked to a valid main pass, ${r.ended} ended (no valid main pass in their category)`);
+      }
+    },
+    {
+      // Main passes set to 'expired' before their expiry date (collecting a supplementary used to do
+      // this to the person's main pass at the same site), and the supplementary passes that ended
+      // with them, are valid again: a pass expires only on its date.
+      id: '2026-11-15-restore-wrongly-expired',
+      run: async (conn) => {
+        const today = businessToday();
+        const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+        const g = (r: any, k: string) => r[k.toUpperCase()] ?? r[k] ?? null;
+        const now = new Date().toISOString();
+        const note = ' [Restored: had been set to expired before its expiry date]';
+        const exp = ymd('expiryDate');
+        // The person's line on the pass's application, closed as 'expired' along with the pass, is
+        // collected again; an application closed as 'expired' is completed again when all its
+        // lines are collected (or cancelled).
+        const reopenLine = async (requestId: string | null, employeeId: string) => {
+          if (!requestId) return;
+          const appRes = ((await conn.execute(`SELECT id, status FROM passRequests WHERE UPPER(id) = UPPER(:id)`, { id: requestId }, opts)).rows || []) as any[];
+          if (!appRes[0]) return;
+          const appId = String(g(appRes[0], 'id'));
+          const people = await loadPeople(conn, appId);
+          const statuses: Record<string, string> = { ...people.employeeStatuses };
+          if (String(statuses[employeeId] || '').toLowerCase() !== 'expired') return;
+          statuses[employeeId] = 'collected';
+          await savePeople(conn, appId, { ...people, employeeStatuses: statuses });
+          const lines = people.employeeIds.map(id => String(statuses[id] || '').toLowerCase());
+          const done = lines.length > 0 && lines.every(st => ['collected', 'completed', 'active', 'cancelled', 'rejected'].includes(st));
+          if (String(g(appRes[0], 'status') || '').toLowerCase() === 'expired' && done) {
+            await conn.execute(`UPDATE passRequests SET status = 'completed', updatedAt = :now WHERE id = :id`, { now, id: appId });
+          }
+        };
+        const mains = ((await conn.execute(
+          `SELECT id, employeeId, passNumber, requestId FROM passes
+            WHERE deletedAt IS NULL AND LOWER(TRIM(COALESCE(type, '~'))) = 'main'
+              AND LOWER(TRIM(COALESCE(status, '~'))) = 'expired' AND ${exp} >= :today`, { today }, opts)).rows || []) as any[];
+        let supps = 0;
+        for (const m of mains) {
+          await conn.execute(
+            `UPDATE passes SET status = 'active', updatedAt = :now, remarks = SUBSTR(COALESCE(remarks, '') || :note, 1, 1000) WHERE id = :id`,
+            { now, note, id: g(m, 'id') });
+          await reopenLine(g(m, 'requestId'), String(g(m, 'employeeId')));
+          const sRows = ((await conn.execute(
+            `SELECT id, employeeId, requestId FROM passes
+              WHERE parentPassId = :id AND deletedAt IS NULL AND LOWER(TRIM(COALESCE(status, '~'))) = 'expired' AND ${exp} >= :today`,
+            { id: g(m, 'id'), today }, opts)).rows || []) as any[];
+          for (const sp of sRows) {
+            await conn.execute(
+              `UPDATE passes SET status = CASE WHEN handoverBy IS NOT NULL THEN 'collected' ELSE 'active' END, updatedAt = :now,
+                      remarks = SUBSTR(COALESCE(remarks, '') || :note, 1, 1000) WHERE id = :id`,
+              { now, note, id: g(sp, 'id') });
+            await reopenLine(g(sp, 'requestId'), String(g(sp, 'employeeId')));
+            supps++;
+          }
+          logger.info('[Migration] restored main pass wrongly set to expired', { pass: g(m, 'passNumber') || g(m, 'id') });
+        }
+        logger.info(`[Migration] restore-wrongly-expired: ${mains.length} main passes and ${supps} supplementary passes valid again`);
       }
     }
   ];

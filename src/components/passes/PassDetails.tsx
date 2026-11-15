@@ -176,7 +176,8 @@ export function PassDetails({
                 <option value="accepted">Accepted</option>
                 <option value="approved">Approved</option>
                 <option value="pending">Pending</option>
-                <option value="expired">Expired</option>
+                {/* Expiry comes from the expiry date, not a choice: shown only for a pass past its date */}
+                {passStatus === 'expired' && <option value="expired" disabled>Expired (by its date)</option>}
                 <option value="revoked">Revoked</option>
                 <option value="cancelled">Cancelled</option>
               </select>
@@ -305,7 +306,7 @@ export function PassDetails({
 
       {currentUser?.role === 'admin' && !isEditing && (
         <div className="flex gap-3 pt-4 border-t border-gray-100">
-          {pass.status !== 'active' && (
+          {pass.status !== 'active' && pass.status !== 'collected' && pass.status !== 'expired' && (
             <button 
               onClick={() => onUpdateStatus('active')}
               className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-sm text-xs"
@@ -313,7 +314,7 @@ export function PassDetails({
               Activate Pass
             </button>
           )}
-          {pass.status === 'active' && (
+          {(pass.status === 'active' || pass.status === 'collected') && (
             <button 
               onClick={() => onUpdateStatus('revoked')}
               className="flex-1 py-3 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 transition-all shadow-sm text-xs"

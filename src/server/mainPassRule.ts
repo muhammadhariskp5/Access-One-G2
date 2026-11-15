@@ -132,3 +132,39 @@ export async function mainPassConflict(
   }
   return null;
 }
+
+// A supplementary pass is a child of a main pass: it can only be collected or made active while
+// the person holds a valid main pass (live status, not past its date) in the same category (the
+// same site when the site has no category). Returns the reason to refuse, or null.
+export async function supplementaryParentMissing(
+  conn: any,
+  employeeId: string,
+  locationId: string | null | undefined,
+  treatAsLive: string[] = [],          // main passes being made active in the same action
+): Promise<string | null> {
+  if (!employeeId || !locationId) return null;
+  const oracledb = (await import('oracledb')).default;
+  const o = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+  const g = (r: any, k: string) => r?.[k.toUpperCase()] ?? r?.[k] ?? null;
+  const loc = ((await conn.execute(
+    `SELECT l.categoryId, l.name AS locationName, c.name AS categoryName FROM locations l LEFT JOIN categories c ON c.id = l.categoryId WHERE l.id = :id`,
+    { id: locationId }, o)).rows || [])[0];
+  const categoryId = g(loc, 'categoryId');
+  const binds: Record<string, unknown> = { emp: employeeId };
+  const alsoLive = treatAsLive.slice(0, 500);
+  alsoLive.forEach((id, i) => { binds[`t${i}`] = id; });
+  const liveStatus = `LOWER(TRIM(COALESCE(p.status, '~'))) IN (${LIVE.map(s => `'${s}'`).join(', ')})`;
+  let where = `p.employeeId = :emp AND p.deletedAt IS NULL AND LOWER(TRIM(COALESCE(p.type, '~'))) = 'main'
+               AND (${liveStatus}${alsoLive.length ? ` OR p.id IN (${alsoLive.map((_, i) => `:t${i}`).join(', ')})` : ''})`;
+  if (categoryId) { where += ` AND l.categoryId = :cat`; binds.cat = categoryId; }
+  else { where += ` AND p.locationId = :loc`; binds.loc = locationId; }
+  const rows = ((await conn.execute(
+    `SELECT p.expiryDate FROM passes p LEFT JOIN locations l ON l.id = p.locationId WHERE ${where}`, binds, o)).rows || []) as any[];
+  const today = businessToday();
+  if (rows.some(r => { const exp = normalizeDate(g(r, 'expiryDate')); return !exp || exp >= today; })) return null;
+  const emp = ((await conn.execute(`SELECT name FROM employees WHERE id = :id`, { id: employeeId }, o)).rows || [])[0];
+  const who = g(emp, 'name') || 'This person';
+  const where2 = categoryId ? `the ${g(loc, 'categoryName') || 'same'} category` : (g(loc, 'locationName') || 'this site');
+  return `${who} has no valid main pass in ${where2}. A supplementary pass belongs to a main pass: ` +
+    `it can only be collected or activated while the person holds a valid main pass there.`;
+}

@@ -4,6 +4,9 @@
 // sorts and pages it; employee and location names are joined in so the browser doesn't need the
 // full employee list. Every input is whitelisted or bound.
 
+import { effectiveStatusSql } from './passValidity.ts';
+import { businessToday } from './businessDate.ts';
+
 export const PASS_PAGE_SIZE_MAX = 200;
 export const PASS_EXPORT_MAX = 20000;
 
@@ -88,11 +91,12 @@ function combinedSource(engine: string, orgId: string | null, binds: Record<stri
   // Oracle needs both sides of the UNION to agree on LOB-ness, whatever an old table was created with.
   const lob = (c: string) => (engine === 'oracle' ? `TO_CLOB(${c})` : c);
   if (orgId) binds.orgId = orgId;
+  binds.today = businessToday();   // status as of today: a live pass past its expiry date is 'expired'
   const realOrg = orgId ? ' AND p.organizationId = :orgId' : '';
   const appOrg = orgId ? ' AND r.organizationId = :orgId' : '';
   return `
     SELECT p.id AS id, p.requestId AS requestId, p.employeeId AS employeeId, p.locationId AS locationId,
-           p.type AS type, p.status AS status, p.startDate AS startDate, CAST(NULL AS VARCHAR2(50)) AS issueDate,
+           p.type AS type, ${effectiveStatusSql('p')} AS status, p.startDate AS startDate, CAST(NULL AS VARCHAR2(50)) AS issueDate,
            p.expiryDate AS expiryDate, p.endDate AS endDate, p.passNumber AS passNumber, p.cardNumber AS cardNumber,
            ${lob('p.accessCodes')} AS accessCodes, p.parentPassId AS parentPassId, p.authorityAppNumber AS authorityAppNumber,
            p.contractNumber AS contractNumber, p.clientCompany AS clientCompany, p.remarks AS remarks,
