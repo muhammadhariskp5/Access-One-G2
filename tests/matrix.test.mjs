@@ -42,9 +42,6 @@ before(async () => {
     ('P_EN', 'EARLYNEW', 'L1', 'main', 'expired', '${plus(300)}', '[]', NULL, '${H}', '2026-01-01', '${plus(-3)}')`);
   // One-digit day/month date, stored before dates were normalized: the migration converts it
   db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-14-normalize-dates'`);
-  // Passes stored before end days were recorded: the migration fills them in from their history
-  db.run(`UPDATE passes SET endedOn = NULL`);
-  db.run(`DELETE FROM schemaMigrations WHERE id = '2026-11-15-pass-ended-on'`);
   db.save();
 
   srv = await startServer({ dbPath });
@@ -79,7 +76,7 @@ test('search matches person fields, pass location and access codes; category fil
 
 test('date range, sort, paging; each row carries its passes', async () => {
   // Ended early: in range by the day it ended, not its printed expiry
-  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'ODD']);   // REPL ended when replaced
+  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL', 'ODD']);
   assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(-5)}&to=${plus(-1)}`), ['EARLYNEW']);
   assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(290)}&to=${plus(310)}`), []);
   assert.deepEqual(await ids('page=1&status=all_records&sort=name&order=desc'), ['EARLYNEW', 'EARLYOLD', 'ODD', 'REPL', 'OLDEXP', 'RECENT', 'VALID']);

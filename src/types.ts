@@ -122,7 +122,6 @@ export interface Pass {
   issueDate?: string;
   expiryDate?: string;
   endDate?: string;
-  endedOn?: string; // the day it ended (recorded by the server when it took an ended status)
   status: PassStatus;
   accessCodes: string[];
   remarks?: string;

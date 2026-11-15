@@ -66,19 +66,24 @@ const isRecentlyExpired = (p: Pass, days: number) => {
   if (days <= 0 || !isPassExpired(p) || isPassReplaced(p)) return false;
   const s = String(p.status || '').toLowerCase().trim();
   if (s === 'revoked' || s === 'cancelled' || s === 'rejected' || s === 'draft') return false;
-  // When it ended: its recorded end day (set when it ended), else its expiry date
-  const ended = parseToYMD(p.endedOn) || parseToYMD(p.expiryDate);
+  // When it ended: its expiry date if that has passed; if it was ended early (marked expired before
+  // its date), the day it was changed - not a future expiry date
+  const exp = parseToYMD(p.expiryDate);
+  const today = parseToYMD(new Date());
+  const ended = exp && today && exp < today ? exp : (parseToYMD(p.updatedAt) || exp);
   if (!ended) return false;
   const cutoff = parseToYMD(new Date(Date.now() - days * 86400000));
   return !!cutoff && ended >= cutoff;
 };
 
-// The date to show for a pass: its expiry; for one ended before its expiry date, "Ended <the
-// recorded end day>" so it doesn't read as valid until a future date
+// The date to show for a pass: its expiry; for one ended early (marked expired before its expiry
+// date), "Ended <the day it was changed>" so it doesn't read as valid until a future date
 const expiryLabel = (p: Pass) => {
   const exp = parseToYMD(p.expiryDate);
-  const ended = parseToYMD(p.endedOn);
-  if (ended && (!exp || ended < exp)) return `Ended ${formatDate(ended)}`;
+  const today = parseToYMD(new Date());
+  if (isPassExpired(p) && exp && today && exp >= today) {
+    return `Ended ${formatDate(p.updatedAt || p.expiryDate)}`;
+  }
   return formatDate(p.expiryDate);
 };
 
@@ -136,9 +141,8 @@ export function AccessMatrix({
     let relevantPasses: Pass[] = [];
     if (activeLocPasses.length > 0) {
       const map = new Map<string, Pass>();
-      // By date: the pass valid the longest wins (ascending, the last one set is kept)
       const sortedByDate = [...activeLocPasses].sort((a, b) =>
-        String(parseToYMD(a.expiryDate) || '9999-12-31').localeCompare(String(parseToYMD(b.expiryDate) || '9999-12-31'))
+        new Date(a.updatedAt || a.createdAt || 0).getTime() - new Date(b.updatedAt || b.createdAt || 0).getTime()
       );
       sortedByDate.forEach(pass => {
         const key = pass.type === 'main' ? 'main' : `supp-${[...(pass.accessCodes || [])].sort().join(',')}`;
@@ -148,13 +152,12 @@ export function AccessMatrix({
     } else if (filterStatus === 'expired' || filterStatus === 'all_records' || showsRecentExpired) {
       const expiredLocPasses = empPasses.filter(p =>
         p.locationId === locId && isPassExpired(p) && !isPassReplaced(p) &&
-        (filterStatus === 'all_records' || !['cancelled', 'rejected'].includes(String(p.status || '').toLowerCase().trim())) &&
         (filterStatus === 'expired' || filterStatus === 'all_records' || isRecentlyExpired(p, expiredWindowDays))
       );
       if (expiredLocPasses.length > 0) {
-        // The one that ended last (recorded end day, else expiry)
-        const endOf = (p: Pass) => String(parseToYMD(p.endedOn) || parseToYMD(p.expiryDate) || '');
-        const latestExpired = [...expiredLocPasses].sort((a, b) => endOf(b).localeCompare(endOf(a)))[0];
+        const latestExpired = [...expiredLocPasses].sort((a, b) =>
+          new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
+        )[0];
         relevantPasses = [latestExpired];
       }
     }

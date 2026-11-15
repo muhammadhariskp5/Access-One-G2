@@ -13,7 +13,6 @@ import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { normalizeDate, normalizeStoredDates, repairEmployeeDates } from "./src/server/dates.ts";
 import { relinkEmployeeReferences } from "./src/server/relink.ts";
 import { enforceOneMainPassPerCategory } from "./src/server/mainPassRule.ts";
-import { installPassEnd, stampMissingEndDates } from './src/server/passEnd.ts';
 import { settleSupplementaries } from "./src/server/supplementaryRule.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
@@ -1017,7 +1016,6 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       'PARENTPASSID': 'parentPassId',
       'PASSNUMBER': 'passNumber',
       'EXPIRYDATE': 'expiryDate',
-      'ENDEDON': 'endedOn',
       'ACCESSCODES': 'accessCodes',
       'REMARKS': 'remarks',
       'APPROVALREMARKS': 'approvalRemarks',
@@ -1486,10 +1484,6 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         const supp = await settleSupplementaries(connection, null);
         const expiredCount = (expiredMain?.rowsAffected || 0) + supp.ended;
 
-        // 3b. Every ended pass has its end day recorded (the trigger does this; this catches any it missed)
-        const endStamped = await stampMissingEndDates(connection, today);
-        if (endStamped > 0) logger.warn(`[DailyJob] ${today}: recorded the end day of ${endStamped} passes the trigger missed`);
-
         // 4. Close application lines / applications for passes that just expired
         const appsClosed = expiredCount > 0 ? await closeApplicationsForEndedPasses(connection, now) : 0;
 
@@ -1756,14 +1750,6 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       run: async (conn) => {
         const r = await settleSupplementaries(conn, null);
         logger.info(`[Migration] supplementary passes: ${r.relinked} re-linked to a valid main pass, ${r.ended} ended (no valid main pass in their category)`);
-      }
-    },
-    {
-      // The day a pass ended is recorded on the pass (endedOn), not read from when it was last changed
-      id: '2026-11-15-pass-ended-on',
-      run: async (conn) => {
-        const n = await installPassEnd(conn, getDbEngine(), businessToday());
-        logger.info(`[Migration] pass end dates recorded for ${n} ended passes`);
       }
     }
   ];

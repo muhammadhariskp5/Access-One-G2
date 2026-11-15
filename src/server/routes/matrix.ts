@@ -4,7 +4,6 @@ import { ymd } from "../passQuery.ts";
 import { pageClause } from "../employeeQuery.ts";
 import { businessToday, addDays } from "../businessDate.ts";
 import { normalizeDate } from "../dates.ts";
-import { passEndSql } from "../passEnd.ts";
 import type { RouteContext } from "../context.ts";
 
 // --- Access Matrix: who appears, searched, sorted and paged by the database ---
@@ -13,10 +12,8 @@ import type { RouteContext } from "../context.ts";
 //   valid    - status active/collected/completed/received, not replaced, not expired
 //   expired  - status 'expired' or expiry date before today
 //   replaced - status replaced/superseded, or remarks mention "replaced"
-//   recent   - ended within the user's window (Settings > Display), not replaced/revoked/cancelled
+//   recent   - expired within the user's window (Settings > Display), not replaced/revoked/cancelled
 //   in range - the date-range filter (isPassInDateRange)
-// "When a pass ended" is its recorded end day (passes.endedOn), else its expiry - never the time it
-// was last changed.
 // Each row comes with all of that person's live passes; the screen builds its cells from them as
 // before. GET /api/matrix?page=&pageSize=&q=&status=&category=&from=&to=&sort=&order=&expiredDays=
 // or &all=1 (export / print). Returns { items: [employee + passes], total, page, pageSize }.
@@ -78,13 +75,13 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
             const replaced = ['replaced', 'superseded'].includes(st) || rm.includes('replaced');
             const expired = st === 'expired' || (!!exp && exp < today);
             const valid = ['active', 'collected', 'completed', 'received'].includes(st) && !replaced && !expired;
-            const ended = normalizeDate(g(p, 'endedOn')) || exp;   // recorded end day, else expiry
+            const ended = exp && exp < today ? exp : (normalizeDate(g(p, 'updatedAt')) || exp);   // ended early: when it was changed
             const recent = expired && !replaced && !['revoked', 'cancelled', 'rejected', 'draft'].includes(st) && !!ended && ended >= cutoff;
             return {
               id: g(p, 'id'), passNumber: g(p, 'passNumber'), status: g(p, 'status'), type: g(p, 'type'),
               location: g(p, 'locationName'), parentPassId: g(p, 'parentPassId'), lastChanged: g(p, 'updatedAt'), remarks: g(p, 'remarks'),
               linkedBy: String(g(p, 'employeeId')) === id ? 'id' : `code/QID "${g(p, 'employeeId')}" (not re-linked yet)`,
-              deleted: !!g(p, 'deletedAt'), expiryStored: expRaw, expiryRead: exp, endedOn: g(p, 'endedOn'),
+              deleted: !!g(p, 'deletedAt'), expiryStored: expRaw, expiryRead: exp,
               valid, expired, recentlyExpired: recent, replaced,
             };
           }),
@@ -134,10 +131,13 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
       if (showsRecent) binds.cutoff = addDays(today, -expiredDays);
       const RECENT = showsRecent
         ? `(${EXPIRED} AND NOT ${REPL} AND ${st} NOT IN ('revoked', 'cancelled', 'rejected', 'draft')
-            AND ${passEndSql('p')} >= :cutoff)`
+            AND (CASE WHEN ${exp} IS NOT NULL AND ${exp} < :today THEN ${exp} ELSE ${ymd('p.updatedAt')} END) >= :cutoff)`
         : `(1 = 0)`;
-      // When a pass ends: its recorded end day, else its expiry (the date shown as "Ended <date>")
-      const END = passEndSql('p');
+      // When a pass ends: its expiry date; for one ended early (marked expired before its expiry
+      // date), the day it was changed - the same date the screen shows as "Ended <date>"
+      const END = `(CASE WHEN ${st} = 'expired' AND (${exp} IS NULL OR ${exp} >= :today)
+                         THEN COALESCE(${ymd('p.updatedAt')}, ${exp})
+                         ELSE ${ymd('COALESCE(p.expiryDate, p.endDate)')} END)`;
       let IN_RANGE = '1 = 1';
       if (from) { binds.dFrom = from; IN_RANGE += ` AND NOT (${END} IS NOT NULL AND ${END} < :dFrom)`; }
       if (to) {
