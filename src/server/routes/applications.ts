@@ -13,13 +13,29 @@ import { authRateLimit } from "../rateLimit.ts";
 import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
 import { pageClause } from "../employeeQuery.ts";
-import { enforceOneMainPassPerCategory } from "../mainPassRule.ts";
+import { enforceOneMainPassPerCategory, mainPassConflict } from "../mainPassRule.ts";
 import { respondDelta } from "../syncStamp.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
 
 // applications routes (moved verbatim from server.ts; shared helpers come from the route context)
 export function registerApplicationRoutes(app: express.Express, ctx: RouteContext) {
   const { oracledb, logAction, createNotification, notifyAdmins, cleanupOldCategoryPasses, authorize, validatePassExpiries, getConnection, toCamelCase, toOracleKeys, getTenantOrgId, getDbEngine, closeApplicationsForEndedPasses } = ctx;
+
+  // A main application must not give anyone a second valid main pass in the category: refused when
+  // it is created or people are added (while they hold one), and when it is collected. The
+  // application's own passes don't count. Returns the refusal message, or null.
+  const ACTIVATING = ['collected', 'completed', 'active'];
+  const appMainConflict = async (connection: any, appRow: any, employeeIds: string[], override: { type?: string; locationId?: string } = {}) => {
+    const g = (k: string) => appRow?.[k.toUpperCase()] ?? appRow?.[k] ?? null;
+    const type = String(override.type || g('type') || 'main').toLowerCase();
+    if (type !== 'main') return null;
+    const locationId = override.locationId || g('locationId');
+    for (const empId of employeeIds) {
+      const conflict = await mainPassConflict(connection, empId, locationId, { excludeRequestId: g('id') });
+      if (conflict) return conflict;
+    }
+    return null;
+  };
   app.get("/api/passApplications", authorize(['admin', 'approver', 'applier', 'viewer']), async (req, res) => {
     let connection;
     try {
@@ -155,6 +171,8 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
           startDate: filteredBody.startDate
         };
         await validatePassExpiries(connection, employeeIds, validationData, individualExpiries);
+        const conflict = await appMainConflict(connection, {}, employeeIds, { type: req.body.type || filteredBody.type || 'main', locationId: filteredBody.locationId });
+        if (conflict) return res.status(409).json({ error: conflict });
       } catch (err: any) {
         return res.status(400).json({ error: err.message });
       }
@@ -477,6 +495,21 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const curStatus = String(((curRes.rows || [])[0] as any)?.STATUS ?? ((curRes.rows || [])[0] as any)?.status ?? '').toLowerCase();
       const statusChanged = !!req.body.status && String(req.body.status).toLowerCase() !== curStatus;
 
+      // Second-main-pass rule: people added to a main application, or everyone when it is collected
+      {
+        const rowRes = await connection.execute(`SELECT id, type, locationId FROM passRequests WHERE id = :id`, { id: req.params.id }, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+        const appRow: any = (rowRes.rows || [])[0];
+        if (appRow) {
+          const current = await loadPeople(connection, req.params.id);
+          const next: string[] = Array.isArray(req.body.employeeIds) ? req.body.employeeIds.map(String) : current.employeeIds;
+          const toCheck = statusChanged && ACTIVATING.includes(String(req.body.status).toLowerCase())
+            ? next
+            : next.filter(e => !current.employeeIds.includes(e));
+          const conflict = await appMainConflict(connection, appRow, toCheck, { type: req.body.type, locationId: req.body.locationId });
+          if (conflict) return res.status(409).json({ error: conflict });
+        }
+      }
+
       // People (who is on it, their statuses and own dates) go to the link table
       const peopleChanged = PEOPLE_FIELDS.some(f => filteredUpdates[f] !== undefined);
       for (const f of PEOPLE_FIELDS) delete filteredUpdates[f];
@@ -637,6 +670,12 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const result = await connection.execute(`SELECT * FROM passRequests WHERE UPPER(id) = UPPER(:id)`, [req.params.id]);
       const application = result.rows?.[0] as any;
       if (!application) return res.status(404).json({ error: "Application not found" });
+
+      if (ACTIVATING.includes(String(status || '').toLowerCase())) {
+        const ppl = await loadPeople(connection, String(application.ID ?? application.id));
+        const conflict = await appMainConflict(connection, application, ppl.employeeIds);
+        if (conflict) return res.status(409).json({ error: conflict });
+      }
 
       const updates: any = { status, updatedAt: now };
       if (remarks) updates.remarks = remarks;
@@ -849,6 +888,11 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const people = await loadPeople(connection, appId);
       const employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
       const allEmployeeIds = people.employeeIds;
+
+      if (['collected', 'completed'].includes(String(status || '').toLowerCase())) {
+        const conflict = await appMainConflict(connection, application, (employeeIds || []).map(String));
+        if (conflict) return res.status(409).json({ error: conflict });
+      }
 
       (employeeIds || []).forEach((empId: string) => {
         const lowerStatus = status?.toLowerCase();
@@ -1108,6 +1152,11 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
       const people = await loadPeople(connection, appId);
       const employeeStatuses: Record<string, string> = { ...people.employeeStatuses };
       const employeeIds = people.employeeIds;
+
+      if (['collected', 'completed'].includes(String(req.body.status || '').toLowerCase())) {
+        const conflict = await appMainConflict(connection, application, [req.params.employeeId]);
+        if (conflict) return res.status(409).json({ error: conflict });
+      }
 
       employeeStatuses[req.params.employeeId] = req.body.status;
 

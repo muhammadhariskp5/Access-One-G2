@@ -15,6 +15,7 @@ export async function enforceOneMainPassPerCategory(
   conn: any,
   employeeIds: string[] | null,                       // null = everyone
   onEnded?: (requestIds: string[]) => Promise<unknown>, // close the replaced passes' application lines
+  reportOnly = false,                                 // true: only log, change nothing
 ): Promise<{ groups: number; replaced: number }> {
   const oracledb = (await import('oracledb')).default;
   const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
@@ -58,6 +59,10 @@ export async function enforceOneMainPassPerCategory(
   for (const [key, list] of groups) {
     if (list.length < 2) continue;
     groupCount++;
+    if (reportOnly) {
+      logger.warn('[MainPassRule] person holds several valid main passes in one category - cancel the wrong one', { key, passes: list.map(d => d.passNumber || d.id) });
+      continue;
+    }
     // Keep the one valid longest; on a tie, the newest
     list.sort((a, b) => b.exp.localeCompare(a.exp) || b.created.localeCompare(a.created));
     const keep = list[0];
@@ -79,4 +84,51 @@ export async function enforceOneMainPassPerCategory(
   }
   if (onEnded && endedRequests.length) await onEnded(Array.from(new Set(endedRequests)));
   return { groups: groupCount, replaced };
+}
+
+// --- Refuse a second main pass (checked BEFORE anything is written) ---
+// While someone holds a valid main pass in a category, another main pass in that category is
+// refused until the first is cancelled or expires. Exception: renewal - when the current one ends
+// within RENEWAL_DAYS, a new one may be applied for / issued; once it is collected the old one is
+// retired. Returns the refusal message, or null when allowed.
+export const RENEWAL_DAYS = 45;
+
+export async function mainPassConflict(
+  conn: any,
+  employeeId: string,
+  locationId: string | null | undefined,
+  opts: { excludeRequestId?: string | null; excludePassId?: string | null } = {},
+): Promise<string | null> {
+  if (!employeeId || !locationId) return null;
+  const oracledb = (await import('oracledb')).default;
+  const o = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+  const g = (r: any, k: string) => r?.[k.toUpperCase()] ?? r?.[k] ?? null;
+  const loc = ((await conn.execute(`SELECT categoryId FROM locations WHERE id = :id`, { id: locationId }, o)).rows || [])[0];
+  const categoryId = g(loc, 'categoryId');
+  const binds: Record<string, unknown> = { emp: employeeId };
+  let where = `p.employeeId = :emp AND p.deletedAt IS NULL AND LOWER(TRIM(COALESCE(p.type, '~'))) = 'main'
+               AND LOWER(TRIM(COALESCE(p.status, '~'))) IN (${LIVE.map(s => `'${s}'`).join(', ')})`;
+  if (categoryId) { where += ` AND l.categoryId = :cat`; binds.cat = categoryId; }
+  else { where += ` AND p.locationId = :loc`; binds.loc = locationId; }
+  if (opts.excludeRequestId) { where += ` AND (p.requestId IS NULL OR p.requestId <> :rid)`; binds.rid = opts.excludeRequestId; }
+  if (opts.excludePassId) { where += ` AND p.id <> :pid`; binds.pid = opts.excludePassId; }
+  const rows = ((await conn.execute(
+    `SELECT p.id, p.passNumber, p.expiryDate, l.name AS locationName, e.name AS employeeName
+       FROM passes p LEFT JOIN locations l ON l.id = p.locationId LEFT JOIN employees e ON e.id = p.employeeId
+      WHERE ${where}`, binds, o)).rows || []) as any[];
+  const today = businessToday();
+  const renewFrom = (exp: string) => {
+    const d = new Date(`${exp}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - RENEWAL_DAYS);
+    return d.toISOString().slice(0, 10);
+  };
+  const dmy = (d: string) => `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}`;
+  for (const r of rows) {
+    const exp = normalizeDate(g(r, 'expiryDate'));
+    if (exp && exp < today) continue;                     // already past its date
+    if (exp && renewFrom(exp) <= today) continue;         // renewal window: allowed
+    const who = g(r, 'employeeName') || 'This person';
+    return `${who} already holds a valid main pass in this category (${g(r, 'passNumber') || g(r, 'id')} at ${g(r, 'locationName') || 'another site'}${exp ? `, valid to ${dmy(exp)}` : ''}). ` +
+      `A second main pass is not allowed: cancel that pass first${exp ? `, or renew from ${dmy(renewFrom(exp))} (${RENEWAL_DAYS} days before it expires)` : ''}.`;
+  }
+  return null;
 }

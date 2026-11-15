@@ -1461,8 +1461,9 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
 
       try {
         // 1a. Nobody holds two valid main passes in one category (safety net)
-        const mainRule = await enforceOneMainPassPerCategory(connection, null, ids => closeApplicationsForEndedPasses(connection, now, ids));
-        if (mainRule.replaced > 0) logger.warn(`[DailyJob] ${today}: ${mainRule.replaced} duplicate main passes replaced (${mainRule.groups} people/categories)`);
+        //     Report only: a duplicate must be cancelled by a person, not replaced automatically
+        const mainRule = await enforceOneMainPassPerCategory(connection, null, undefined, true);
+        if (mainRule.groups > 0) logger.warn(`[DailyJob] ${today}: ${mainRule.groups} people hold more than one valid main pass in a category (see [MainPassRule] lines)`);
 
         // 1b. Dates in one stored format (YYYY-MM-DD), so date rules in SQL read them correctly
         const datesFixed = await normalizeStoredDates(connection);
@@ -1737,12 +1738,12 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
       }
     },
     {
-      // One valid main pass per person per category: resolve any existing duplicates (the one valid
-      // longest is kept; supplementary passes move to it)
+      // One valid main pass per person per category: list any existing duplicates (report only)
       id: '2026-11-14-one-main-pass-per-category',
       run: async (conn) => {
-        const r = await enforceOneMainPassPerCategory(conn, null, ids => closeApplicationsForEndedPasses(conn, new Date().toISOString(), ids));
-        logger.info(`[Migration] one main pass per category: ${r.replaced} duplicate main passes replaced (${r.groups} people/categories)`);
+        // Report only (no automatic replacement): duplicates are listed for an administrator to cancel
+        const r = await enforceOneMainPassPerCategory(conn, null, undefined, true);
+        logger.info(`[Migration] one main pass per category: ${r.groups} people hold more than one valid main pass in a category (see [MainPassRule] lines)`);
       }
     }
   ];

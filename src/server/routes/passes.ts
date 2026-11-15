@@ -4,6 +4,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
 import { findMissingEmployees, loadPeople, savePeople } from "../requestLinks.ts";
+import { mainPassConflict } from "../mainPassRule.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
 import { pageClause } from "../employeeQuery.ts";
@@ -158,23 +159,12 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         return res.status(400).json({ error: err.message });
       }
 
-      // Duplicate Main Pass Check for the batch
+      // One valid main pass per person per category (renewal window excepted). The application's
+      // own earlier passes don't count: issuing again supersedes them.
       if (filteredCommonData.type === 'main') {
         for (const empId of employeeIds) {
-          const result = await connection.execute(
-            `SELECT p.id FROM passes p 
-             JOIN locations l ON p.locationId = l.id 
-             WHERE p.employeeId = :employeeId 
-             AND p.status = 'active' 
-             AND p.type = 'main'
-             AND l.categoryId = (SELECT categoryId FROM locations WHERE id = :locationId)`,
-            { employeeId: empId, locationId: filteredCommonData.locationId },
-            { outFormat: oracledb.OUT_FORMAT_OBJECT }
-          );
-          if (result.rows && result.rows.length > 0) {
-            const empRes = await connection.execute(`SELECT name FROM employees WHERE id = :id`, [empId], { outFormat: oracledb.OUT_FORMAT_OBJECT });
-            return res.status(400).json({ error: `Employee ${empRes.rows?.[0]?.NAME || empId} already has an active Main Pass for this category.` });
-          }
+          const conflict = await mainPassConflict(connection, empId, filteredCommonData.locationId, { excludeRequestId: requestExists ? requestId : null });
+          if (conflict) return res.status(409).json({ error: conflict });
         }
       }
 
@@ -335,21 +325,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
 
       const { employeeId, locationId, type, expiryDate, parentPassId } = req.body;
 
-      // Duplicate Main Pass Check: one Main Pass per category per person
+      // One valid main pass per person per category (renewal window excepted)
       if (type === 'main') {
-        const result = await connection.execute(
-          `SELECT p.id FROM passes p 
-           JOIN locations l ON p.locationId = l.id 
-           WHERE p.employeeId = :employeeId 
-           AND p.status = 'active' 
-           AND p.type = 'main'
-           AND l.categoryId = (SELECT categoryId FROM locations WHERE id = :locationId)`,
-          { employeeId, locationId },
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        if (result.rows && result.rows.length > 0) {
-          return res.status(400).json({ error: "Employee already has an active Main Pass for this category." });
-        }
+        const conflict = await mainPassConflict(connection, employeeId, locationId);
+        if (conflict) return res.status(409).json({ error: conflict });
       }
 
       // Strict Expiry Validation
@@ -458,6 +437,15 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       oldPass.accessCodes = JSON.parse(rawPass.ACCESSCODES || '[]');
 
       const updatedPass = { ...oldPass, ...req.body };
+
+      // A main pass becoming valid (or moving site) must not give the person a second valid one
+      const LIVE = ['active', 'collected', 'completed', 'received'];
+      const becomesLive = LIVE.includes(String(updatedPass.status || '').toLowerCase()) &&
+        (!LIVE.includes(String(oldPass.status || '').toLowerCase()) || updatedPass.locationId !== oldPass.locationId);
+      if (String(updatedPass.type || '').toLowerCase() === 'main' && becomesLive) {
+        const conflict = await mainPassConflict(connection, updatedPass.employeeId, updatedPass.locationId, { excludePassId: oldPass.id });
+        if (conflict) return res.status(409).json({ error: conflict });
+      }
 
       // Auto-generate Pass Number when status becomes active
       if (updatedPass.status === 'active' && !updatedPass.passNumber) {
@@ -690,6 +678,20 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
       let targetPassStatus = status;
       // Note: We used to coerce 'collected' to 'active' here. 
       // Now we keep 'collected' as a distinct state for the "Collected -> Active" flow.
+
+      // Making main passes valid must not give anyone a second valid one: check all before writing
+      const LIVE = ['active', 'collected', 'completed', 'received'];
+      if (LIVE.includes(String(targetPassStatus || '').toLowerCase())) {
+        for (const id of passIds) {
+          const pr = await connection.execute(`SELECT employeeId, locationId, type, status FROM passes WHERE id = :id`, [id], { outFormat: oracledb.OUT_FORMAT_OBJECT });
+          const p: any = pr.rows?.[0];
+          if (!p) continue;
+          const g = (k: string) => p[k.toUpperCase()] ?? p[k];
+          if (String(g('type') || '').toLowerCase() !== 'main' || LIVE.includes(String(g('status') || '').toLowerCase())) continue;
+          const conflict = await mainPassConflict(connection, g('employeeId'), g('locationId'), { excludePassId: id });
+          if (conflict) return res.status(409).json({ error: conflict });
+        }
+      }
 
       for (const id of passIds) {
         // Fetch current pass

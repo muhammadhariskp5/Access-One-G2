@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { startServer, client, openDb, OWNER } from './helpers.mjs';
 
 let srv, admin, locationId, holderId;
+// One valid main pass per person per category: each test pass gets its own holder
+const newHolder = async (code) => (await admin.post('/api/employees', { firstName: 'Pass', lastName: code, name: `Pass ${code}`, employeeId: code, organizationId: 'org-habari' })).body.id;
 
 before(async () => {
   srv = await startServer();
@@ -20,7 +22,7 @@ test('new rows get UUID ids', async () => {
 test('pass numbers are sequential, not random', async () => {
   const body = { employeeId: holderId, locationId, type: 'main', status: 'active', expiryDate: '2030-01-01' };
   const a = (await admin.post('/api/passes', body)).body.passNumber;
-  const b = (await admin.post('/api/passes', body)).body.passNumber;
+  const b = (await admin.post('/api/passes', { ...body, employeeId: await newHolder('PH-2') })).body.passNumber;
   const year = new Date().getFullYear();
   assert.match(a, new RegExp(`^PASS-${year}-\\d{4}$`));
   assert.equal(Number(b.split('-')[2]), Number(a.split('-')[2]) + 1);
@@ -44,7 +46,7 @@ test('deleting an employee hides them but keeps the record', async () => {
 });
 
 test('deleting a pass hides it but keeps the record', async () => {
-  const p = (await admin.post('/api/passes', { employeeId: holderId, locationId, type: 'main', status: 'active', expiryDate: '2030-01-01' })).body;
+  const p = (await admin.post('/api/passes', { employeeId: await newHolder('PH-3'), locationId, type: 'main', status: 'active', expiryDate: '2030-01-01' })).body;
   assert.equal((await admin.del(`/api/passes/${p.id}`)).status, 200);
   assert.equal((await admin.get('/api/passes')).body.some(x => x.id === p.id), false);
 });
