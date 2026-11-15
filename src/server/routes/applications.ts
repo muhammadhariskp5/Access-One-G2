@@ -14,6 +14,7 @@ import { validate, schemas, createSchemas } from "../validation.ts";
 import type { RouteContext } from "../context.ts";
 import { pageClause } from "../employeeQuery.ts";
 import { enforceOneMainPassPerCategory, mainPassConflict } from "../mainPassRule.ts";
+import { settleSupplementaries } from "../supplementaryRule.ts";
 import { respondDelta } from "../syncStamp.ts";
 import { parseApplicationListQuery, buildApplicationList, applicationTabClause, applicationOrderBy, mapApplicationRow, APPLICATION_LIST_COLUMNS, APPLICATION_COUNT_COLUMNS, APP_EXPORT_MAX } from "../applicationQuery.ts";
 
@@ -458,6 +459,9 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
     if (['collected', 'completed', 'active'].includes(normStatus)) {
       await enforceOneMainPassPerCategory(connection, employeeIds, ids => closeApplicationsForEndedPasses(connection, now, ids));
     }
+
+    // Main passes of this application may have ended: their people's supplementaries follow
+    await settleSupplementaries(connection, employeeIds);
 
     // Persist each person's updated status
     await connection.execute(`UPDATE passRequests SET updatedAt = :updatedAt WHERE id = :id`, { updatedAt: now, id: realId });

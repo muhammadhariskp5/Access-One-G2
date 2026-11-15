@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { debugLog, logger } from "../log.ts";
 import { findMissingEmployees, loadPeople, savePeople } from "../requestLinks.ts";
 import { mainPassConflict } from "../mainPassRule.ts";
+import { settleSupplementaries } from "../supplementaryRule.ts";
 import { newId, newRef, nextSequenceValue } from "../ids.ts";
 import { SYSTEM_USER_ID } from "../integrity.ts";
 import { pageClause } from "../employeeQuery.ts";
@@ -602,6 +603,8 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           ['expired', 'revoked', 'replaced', 'superseded'].includes(String(req.body.status).toLowerCase())) {
         await closeApplicationsForEndedPasses(connection, new Date().toISOString(), [oldPass.requestId]);
       }
+      // A main pass that changed: its person's supplementaries follow (re-linked or ended)
+      if (String(oldPass.type || '').toLowerCase() === 'main') await settleSupplementaries(connection, [oldPass.employeeId]);
 
       await connection.commit();
 
@@ -619,52 +622,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
     }
   };
 
-  app.patch("/api/passes/:id", authorize(['admin', 'approver', 'applier']), validate(schemas.pass), handlePassUpdate);
-  app.patch("/api/passes/:id/status", authorize(['admin', 'approver', 'applier']), handlePassUpdate);
-
-  // Live supplementary passes that revoking these passes would also revoke: those linked to one of
-  // them, and those of the same person when the pass being revoked is a main pass. Shown in the
-  // revoke confirmation. Body: { ids: string[] }.
-  app.post("/api/passes/linked-supplementary", authorize(['admin', 'approver', 'applier']), async (req, res) => {
-    let connection;
-    try {
-      const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
-        .filter((v: unknown) => typeof v === 'string' && v && !v.startsWith('virtual-')).slice(0, 500) as string[];
-      if (ids.length === 0) return res.json([]);
-      connection = await getConnection();
-      const { orgId } = await getTenantOrgId(req, connection);
-      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
-      const binds: Record<string, unknown> = {};
-      ids.forEach((id, i) => { binds[`i${i}`] = id; });
-      const inIds = ids.map((_, i) => `:i${i}`).join(', ');
-      if (orgId) binds.orgId = orgId;
-      const org = orgId ? ' AND sp.organizationId = :orgId' : '';
-      const r = await connection.execute(
-        `SELECT sp.id AS id, sp.employeeId AS employeeId, sp.locationId AS locationId, sp.passNumber AS passNumber,
-                sp.status AS status, e.name AS employeeName, l.name AS locationName
-           FROM passes sp
-           LEFT JOIN employees e ON e.id = sp.employeeId
-           LEFT JOIN locations l ON l.id = sp.locationId
-          WHERE sp.type = 'supplementary' AND sp.deletedAt IS NULL${org}
-            AND LOWER(COALESCE(sp.status, '~')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired')
-            AND (sp.parentPassId IN (${inIds})
-                 OR sp.employeeId IN (SELECT t.employeeId FROM passes t WHERE t.id IN (${inIds}) AND t.type = 'main'))`,
-        binds, opts
-      );
-      const g = (row: any, k: string) => row[k.toUpperCase()] ?? row[k] ?? null;
-      res.json(((r.rows || []) as any[]).map(row => ({
-        id: g(row, 'id'), employeeId: g(row, 'employeeId'), locationId: g(row, 'locationId'),
-        passNumber: g(row, 'passNumber'), status: g(row, 'status'),
-        employeeName: g(row, 'employeeName'), locationName: g(row, 'locationName'),
-      })));
-    } catch (err) {
-      logger.error('Unhandled error', { err: err });
-      res.status(500).json({ error: "Failed to check linked passes" });
-    } finally {
-      if (connection) await connection.close();
-    }
-  });
-
+  // Registered before /api/passes/:id, which would otherwise take "bulk-status" as a pass ID
   app.patch("/api/passes/bulk-status", authorize(['admin', 'approver', 'applier']), async (req, res) => {
     let connection;
     try {
@@ -693,6 +651,7 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         }
       }
 
+      const mainHolders = new Set<string>();
       for (const id of passIds) {
         // Fetch current pass
         const passResult = await connection.execute(`SELECT * FROM passes WHERE id = :id`, [id], { outFormat: oracledb.OUT_FORMAT_OBJECT });
@@ -798,7 +757,10 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
             await closeApplicationsForEndedPasses(connection, updatedAt, [currentPass.requestId]);
           }
         }
+        if (String(currentPass.type || '').toLowerCase() === 'main') mainHolders.add(String(currentPass.employeeId));
       }
+      // Main passes that changed: their people's supplementaries follow (re-linked or ended)
+      await settleSupplementaries(connection, Array.from(mainHolders));
       await connection.commit();
 
       logAction(req, 'UPDATE', 'pass', 'bulk', `Bulk updated ${passIds.length} passes to ${status}`);
@@ -806,6 +768,52 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
     } catch (err) {
       logger.error('Unhandled error', { err: err });
       res.status(500).json({ error: "Failed to bulk update passes" });
+    } finally {
+      if (connection) await connection.close();
+    }
+  });
+
+  app.patch("/api/passes/:id", authorize(['admin', 'approver', 'applier']), validate(schemas.pass), handlePassUpdate);
+  app.patch("/api/passes/:id/status", authorize(['admin', 'approver', 'applier']), handlePassUpdate);
+
+  // Live supplementary passes that revoking these passes would also revoke: those linked to one of
+  // them, and those of the same person when the pass being revoked is a main pass. Shown in the
+  // revoke confirmation. Body: { ids: string[] }.
+  app.post("/api/passes/linked-supplementary", authorize(['admin', 'approver', 'applier']), async (req, res) => {
+    let connection;
+    try {
+      const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+        .filter((v: unknown) => typeof v === 'string' && v && !v.startsWith('virtual-')).slice(0, 500) as string[];
+      if (ids.length === 0) return res.json([]);
+      connection = await getConnection();
+      const { orgId } = await getTenantOrgId(req, connection);
+      const opts = { outFormat: oracledb.OUT_FORMAT_OBJECT };
+      const binds: Record<string, unknown> = {};
+      ids.forEach((id, i) => { binds[`i${i}`] = id; });
+      const inIds = ids.map((_, i) => `:i${i}`).join(', ');
+      if (orgId) binds.orgId = orgId;
+      const org = orgId ? ' AND sp.organizationId = :orgId' : '';
+      const r = await connection.execute(
+        `SELECT sp.id AS id, sp.employeeId AS employeeId, sp.locationId AS locationId, sp.passNumber AS passNumber,
+                sp.status AS status, e.name AS employeeName, l.name AS locationName
+           FROM passes sp
+           LEFT JOIN employees e ON e.id = sp.employeeId
+           LEFT JOIN locations l ON l.id = sp.locationId
+          WHERE sp.type = 'supplementary' AND sp.deletedAt IS NULL${org}
+            AND LOWER(COALESCE(sp.status, '~')) NOT IN ('revoked', 'cancelled', 'rejected', 'expired')
+            AND (sp.parentPassId IN (${inIds})
+                 OR sp.employeeId IN (SELECT t.employeeId FROM passes t WHERE t.id IN (${inIds}) AND t.type = 'main'))`,
+        binds, opts
+      );
+      const g = (row: any, k: string) => row[k.toUpperCase()] ?? row[k] ?? null;
+      res.json(((r.rows || []) as any[]).map(row => ({
+        id: g(row, 'id'), employeeId: g(row, 'employeeId'), locationId: g(row, 'locationId'),
+        passNumber: g(row, 'passNumber'), status: g(row, 'status'),
+        employeeName: g(row, 'employeeName'), locationName: g(row, 'locationName'),
+      })));
+    } catch (err) {
+      logger.error('Unhandled error', { err: err });
+      res.status(500).json({ error: "Failed to check linked passes" });
     } finally {
       if (connection) await connection.close();
     }

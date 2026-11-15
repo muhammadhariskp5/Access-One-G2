@@ -13,6 +13,7 @@ import { businessToday, BUSINESS_TZ } from "./src/server/businessDate.ts";
 import { normalizeDate, normalizeStoredDates, repairEmployeeDates } from "./src/server/dates.ts";
 import { relinkEmployeeReferences } from "./src/server/relink.ts";
 import { enforceOneMainPassPerCategory } from "./src/server/mainPassRule.ts";
+import { settleSupplementaries } from "./src/server/supplementaryRule.ts";
 import { registerDashboardRoutes } from "./src/server/routes/dashboard.ts";
 import { registerScopeRoutes } from "./src/server/routes/scope.ts";
 import { registerMatrixRoutes } from "./src/server/routes/matrix.ts";
@@ -1478,14 +1479,10 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
           { now, today }
         );
 
-        // 3. Supplementary passes whose parent main pass is no longer live
-        const expiredSupp = await connection.execute(
-          `UPDATE passes SET status = 'expired', updatedAt = :now
-           WHERE type = 'supplementary' AND LOWER(status) NOT IN (${terminalList})
-           AND parentPassId IN (SELECT id FROM passes WHERE LOWER(status) IN ('expired', 'inactive', 'revoked'))`,
-          { now }
-        );
-        const expiredCount = (expiredMain?.rowsAffected || 0) + (expiredSupp?.rowsAffected || 0);
+        // 3. Supplementary passes without a valid main pass in their category: re-linked to the
+        //    person's other valid main pass there, or ended (any end of the main pass, not just expiry)
+        const supp = await settleSupplementaries(connection, null);
+        const expiredCount = (expiredMain?.rowsAffected || 0) + supp.ended;
 
         // 4. Close application lines / applications for passes that just expired
         const appsClosed = expiredCount > 0 ? await closeApplicationsForEndedPasses(connection, now) : 0;
@@ -1744,6 +1741,15 @@ async function scanPassExpiries(connection: any, expiredAt?: string): Promise<nu
         // Report only (no automatic replacement): duplicates are listed for an administrator to cancel
         const r = await enforceOneMainPassPerCategory(conn, null, undefined, true);
         logger.info(`[Migration] one main pass per category: ${r.groups} people hold more than one valid main pass in a category (see [MainPassRule] lines)`);
+      }
+    },
+    {
+      // No valid supplementary pass without a valid main pass in its category: re-link to the
+      // person's valid main pass there, or end it
+      id: '2026-11-15-settle-supplementaries',
+      run: async (conn) => {
+        const r = await settleSupplementaries(conn, null);
+        logger.info(`[Migration] supplementary passes: ${r.relinked} re-linked to a valid main pass, ${r.ended} ended (no valid main pass in their category)`);
       }
     }
   ];
