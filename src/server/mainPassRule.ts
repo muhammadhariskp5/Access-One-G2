@@ -166,5 +166,5 @@ export async function supplementaryParentMissing(
   const who = g(emp, 'name') || 'This person';
   const where2 = categoryId ? `the ${g(loc, 'categoryName') || 'same'} category` : (g(loc, 'locationName') || 'this site');
   return `${who} has no valid main pass in ${where2}. A supplementary pass belongs to a main pass: ` +
-    `it can only be collected or activated while the person holds a valid main pass there.`;
+    `it can only be applied for, collected or activated while the person holds a valid main pass there.`;
 }

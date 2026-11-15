@@ -108,3 +108,13 @@ test('the edit form re-sending "expired" for a pass past its date is no change; 
   const r = await admin.get('/api/passes?page=1&status=active&q=past date');
   assert.deepEqual(r.body.items.map(p => [p.id, p.status]), [['P_MAIN', 'active']]);
 });
+
+test('a supplementary application cannot be created (or someone added) without a valid main pass', async () => {
+  const r = await admin.post('/api/passApplications', { employeeIds: ['N'], locationId: 'L1', type: 'supplementary', endDate: plus(20) });
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.match(r.body.error, /No Main has no valid main pass in the Industrial category.*applied for/);
+  const ok = await admin.post('/api/passApplications', { employeeIds: ['K'], locationId: 'L1', type: 'supplementary', endDate: plus(20) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const add = await admin.patch(`/api/passApplications/${ok.body.id}`, { employeeIds: ['K', 'N'] });
+  assert.equal(add.status, 409, JSON.stringify(add.body));
+});

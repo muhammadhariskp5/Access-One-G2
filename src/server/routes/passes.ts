@@ -171,6 +171,13 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
           if (conflict) return res.status(409).json({ error: conflict });
         }
       }
+      // A supplementary pass needs a valid main pass in the category
+      if (filteredCommonData.type === 'supplementary') {
+        for (const empId of employeeIds) {
+          const missing = await supplementaryParentMissing(connection, empId, filteredCommonData.locationId);
+          if (missing) return res.status(409).json({ error: missing });
+        }
+      }
 
       const newRequest = toOracleKeys({
         id: requestId,
@@ -334,8 +341,8 @@ export function registerPassRoutes(app: express.Express, ctx: RouteContext) {
         const conflict = await mainPassConflict(connection, employeeId, locationId);
         if (conflict) return res.status(409).json({ error: conflict });
       }
-      // A supplementary pass made valid needs a valid main pass in the category
-      if (type === 'supplementary' && ['active', 'collected', 'completed', 'received'].includes(String(req.body.status || '').toLowerCase())) {
+      // A supplementary pass needs a valid main pass in the category
+      if (type === 'supplementary') {
         const missing = await supplementaryParentMissing(connection, employeeId, locationId);
         if (missing) return res.status(409).json({ error: missing });
       }

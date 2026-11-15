@@ -26,14 +26,15 @@ export function registerApplicationRoutes(app: express.Express, ctx: RouteContex
   // it is created or people are added (while they hold one), and when it is collected. The
   // application's own passes don't count. Returns the refusal message, or null.
   const ACTIVATING = ['collected', 'completed', 'active'];
-  // activating = the passes are being collected / made active now
-  const appMainConflict = async (connection: any, appRow: any, employeeIds: string[], override: { type?: string; locationId?: string } = {}, activating = false) => {
+  // activating = the passes are being collected / made active now (kept for callers; the
+  // supplementary check applies at every step)
+  const appMainConflict = async (connection: any, appRow: any, employeeIds: string[], override: { type?: string; locationId?: string } = {}, _activating = false) => {
     const g = (k: string) => appRow?.[k.toUpperCase()] ?? appRow?.[k] ?? null;
     const type = String(override.type || g('type') || 'main').toLowerCase();
     const locationId = override.locationId || g('locationId');
     if (type === 'supplementary') {
-      // A supplementary pass needs a valid main pass in the category before it can be collected
-      if (!activating) return null;
+      // A supplementary pass is a child of a main pass: applying for one (or adding someone to one)
+      // and collecting it both need a valid main pass in the category
       for (const empId of employeeIds) {
         const missing = await supplementaryParentMissing(connection, empId, locationId);
         if (missing) return missing;
