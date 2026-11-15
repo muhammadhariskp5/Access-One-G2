@@ -846,8 +846,8 @@ export function AccessMatrix({
                                       className={cn(
                                         "px-1.5 py-0.5 rounded-full text-[9px] font-bold border transition-colors relative",
                                         isMain 
-                                          ? (isExpired ? "bg-rose-50 text-rose-700 border-rose-200 line-through" : "bg-orange-500 text-white border-orange-600")
-                                          : (isExpired ? "bg-rose-50 text-rose-600 border-rose-200 line-through" : "bg-gray-200 text-gray-700 border-gray-300"),
+                                          ? (isExpired ? "bg-rose-50 text-rose-700 border-rose-200" : "bg-orange-500 text-white border-orange-600")
+                                          : (isExpired ? "bg-rose-50 text-rose-600 border-rose-200" : "bg-gray-200 text-gray-700 border-gray-300"),
                                         isExpired && "opacity-70"
                                       )}
                                       title={`${isMain ? 'Main' : 'Supplementary'} Pass - ${statusLabel}${isExpired ? ' (Expired)' : ''}`}
@@ -1050,8 +1050,8 @@ export function AccessMatrix({
                                           className={cn(
                                             "px-1.5 py-0.5 rounded-full text-[9px] font-bold border inline-block whitespace-nowrap",
                                             isMain 
-                                              ? (isExpired ? "bg-gray-100 text-gray-500 border-gray-200 opacity-60 line-through" : "bg-orange-500 text-white border-orange-600")
-                                              : (isExpired ? "bg-gray-100 text-gray-400 border-gray-200 opacity-60 line-through" : "bg-gray-200 text-gray-700 border-gray-300"),
+                                              ? (isExpired ? "bg-gray-100 text-gray-500 border-gray-200 opacity-60" : "bg-orange-500 text-white border-orange-600")
+                                              : (isExpired ? "bg-gray-100 text-gray-400 border-gray-200 opacity-60" : "bg-gray-200 text-gray-700 border-gray-300"),
                                             isExpired && "opacity-60"
                                           )}
                                         >
