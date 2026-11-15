@@ -75,7 +75,10 @@ test('search matches person fields, pass location and access codes; category fil
 });
 
 test('date range, sort, paging; each row carries its passes', async () => {
-  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL', 'ODD', 'EARLYOLD', 'EARLYNEW']);
+  // Ended early: in range by the day it ended, not its printed expiry
+  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(0)}`), ['VALID', 'REPL', 'ODD']);
+  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(-5)}&to=${plus(-1)}`), ['EARLYNEW']);
+  assert.deepEqual(await ids(`page=1&status=all_records&from=${plus(290)}&to=${plus(310)}`), []);
   assert.deepEqual(await ids('page=1&status=all_records&sort=name&order=desc'), ['EARLYNEW', 'EARLYOLD', 'ODD', 'REPL', 'OLDEXP', 'RECENT', 'VALID']);
   const p2 = await admin.get('/api/matrix?page=2&pageSize=1&status=active&expiredDays=30');
   assert.equal(p2.body.total, 4);

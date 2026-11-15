@@ -94,7 +94,7 @@ export const parseToYMD = (dateVal?: string | Date | null): string | null => {
 };
 
 export const isPassInDateRange = (
-  p: { startDate?: string; issueDate?: string; expiryDate?: string; endDate?: string; createdAt?: string },
+  p: { startDate?: string; issueDate?: string; expiryDate?: string; endDate?: string; createdAt?: string; status?: string; updatedAt?: string },
   start?: string,
   end?: string
 ) => {
@@ -107,7 +107,12 @@ export const isPassInDateRange = (
   const rawEnd = p.expiryDate || p.endDate;
 
   const pStart = parseToYMD(rawStart) || '1970-01-01';
-  const pEnd = parseToYMD(rawEnd);
+  // When it ends: its expiry; for one ended early (marked expired before its expiry date), the day
+  // it was changed - the date the matrix shows as "Ended <date>"
+  const exp = parseToYMD(p.expiryDate);
+  const today = parseToYMD(new Date());
+  const endedEarly = String(p.status || '').toLowerCase().trim() === 'expired' && (!exp || (!!today && exp >= today));
+  const pEnd = endedEarly ? (parseToYMD(p.updatedAt) || exp) : parseToYMD(rawEnd);
 
   if (filterStart) {
     // "start date means pass is valid in/from this date"

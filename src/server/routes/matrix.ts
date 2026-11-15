@@ -133,12 +133,17 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
         ? `(${EXPIRED} AND NOT ${REPL} AND ${st} NOT IN ('revoked', 'cancelled', 'rejected', 'draft')
             AND (CASE WHEN ${exp} IS NOT NULL AND ${exp} < :today THEN ${exp} ELSE ${ymd('p.updatedAt')} END) >= :cutoff)`
         : `(1 = 0)`;
+      // When a pass ends: its expiry date; for one ended early (marked expired before its expiry
+      // date), the day it was changed - the same date the screen shows as "Ended <date>"
+      const END = `(CASE WHEN ${st} = 'expired' AND (${exp} IS NULL OR ${exp} >= :today)
+                         THEN COALESCE(${ymd('p.updatedAt')}, ${exp})
+                         ELSE ${ymd('COALESCE(p.expiryDate, p.endDate)')} END)`;
       let IN_RANGE = '1 = 1';
-      if (from) { binds.dFrom = from; IN_RANGE += ` AND NOT (${ymd('COALESCE(p.expiryDate, p.endDate)')} IS NOT NULL AND ${ymd('COALESCE(p.expiryDate, p.endDate)')} < :dFrom)`; }
+      if (from) { binds.dFrom = from; IN_RANGE += ` AND NOT (${END} IS NOT NULL AND ${END} < :dFrom)`; }
       if (to) {
         binds.dTo = to;
         IN_RANGE += ` AND COALESCE(${ymd('COALESCE(p.startDate, p.createdAt)')}, '1970-01-01') <= :dTo`;
-        IN_RANGE += ` AND NOT (${ymd('COALESCE(p.expiryDate, p.endDate)')} IS NOT NULL AND ${ymd('COALESCE(p.expiryDate, p.endDate)')} > :dTo)`;
+        IN_RANGE += ` AND NOT (${END} IS NOT NULL AND ${END} > :dTo)`;
       }
       const passOf = (extraFrom = '') => `FROM passes p${extraFrom} WHERE p.employeeId = e.id AND p.deletedAt IS NULL AND ${IN_RANGE}`;
       const has = (rule: string) => `EXISTS (SELECT 1 ${passOf()} AND ${rule})`;
