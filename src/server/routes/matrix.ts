@@ -62,7 +62,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
         const pb: Record<string, unknown> = { id };
         names.forEach((n, i) => { pb[`n${i}`] = n; });
         const ps = ((await connection.execute(
-          `SELECT * FROM passes WHERE employeeId = :id OR LOWER(TRIM(employeeId)) IN (${names.map((_, i) => `:n${i}`).join(', ')})`,
+          `SELECT p.*, l.name AS locationName FROM passes p LEFT JOIN locations l ON l.id = p.locationId WHERE p.employeeId = :id OR LOWER(TRIM(p.employeeId)) IN (${names.map((_, i) => `:n${i}`).join(', ')})`,
           pb, opts)).rows || []) as any[];
         out.push({
           employee: { id, name: g(e, 'name'), code: g(e, 'employeeId'), qid: g(e, 'qatarId') || g(e, 'qidVisaNumber'),
@@ -75,10 +75,11 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
             const replaced = ['replaced', 'superseded'].includes(st) || rm.includes('replaced');
             const expired = st === 'expired' || (!!exp && exp < today);
             const valid = ['active', 'collected', 'completed', 'received'].includes(st) && !replaced && !expired;
-            const ended = exp || normalizeDate(g(p, 'updatedAt'));
+            const ended = exp && exp < today ? exp : (normalizeDate(g(p, 'updatedAt')) || exp);   // ended early: when it was changed
             const recent = expired && !replaced && !['revoked', 'cancelled', 'rejected', 'draft'].includes(st) && !!ended && ended >= cutoff;
             return {
               id: g(p, 'id'), passNumber: g(p, 'passNumber'), status: g(p, 'status'), type: g(p, 'type'),
+              location: g(p, 'locationName'), parentPassId: g(p, 'parentPassId'), lastChanged: g(p, 'updatedAt'), remarks: g(p, 'remarks'),
               linkedBy: String(g(p, 'employeeId')) === id ? 'id' : `code/QID "${g(p, 'employeeId')}" (not re-linked yet)`,
               deleted: !!g(p, 'deletedAt'), expiryStored: expRaw, expiryRead: exp,
               valid, expired, recentlyExpired: recent, replaced,
@@ -130,7 +131,7 @@ export function registerMatrixRoutes(app: express.Express, ctx: RouteContext) {
       if (showsRecent) binds.cutoff = addDays(today, -expiredDays);
       const RECENT = showsRecent
         ? `(${EXPIRED} AND NOT ${REPL} AND ${st} NOT IN ('revoked', 'cancelled', 'rejected', 'draft')
-            AND COALESCE(${exp}, ${ymd('p.updatedAt')}) >= :cutoff)`
+            AND (CASE WHEN ${exp} IS NOT NULL AND ${exp} < :today THEN ${exp} ELSE ${ymd('p.updatedAt')} END) >= :cutoff)`
         : `(1 = 0)`;
       let IN_RANGE = '1 = 1';
       if (from) { binds.dFrom = from; IN_RANGE += ` AND NOT (${ymd('COALESCE(p.expiryDate, p.endDate)')} IS NOT NULL AND ${ymd('COALESCE(p.expiryDate, p.endDate)')} < :dFrom)`; }

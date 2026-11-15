@@ -66,10 +66,25 @@ const isRecentlyExpired = (p: Pass, days: number) => {
   if (days <= 0 || !isPassExpired(p) || isPassReplaced(p)) return false;
   const s = String(p.status || '').toLowerCase().trim();
   if (s === 'revoked' || s === 'cancelled' || s === 'rejected' || s === 'draft') return false;
-  const ended = parseToYMD(p.expiryDate) || parseToYMD(p.updatedAt);
+  // When it ended: its expiry date if that has passed; if it was ended early (marked expired before
+  // its date), the day it was changed - not a future expiry date
+  const exp = parseToYMD(p.expiryDate);
+  const today = parseToYMD(new Date());
+  const ended = exp && today && exp < today ? exp : (parseToYMD(p.updatedAt) || exp);
   if (!ended) return false;
   const cutoff = parseToYMD(new Date(Date.now() - days * 86400000));
   return !!cutoff && ended >= cutoff;
+};
+
+// The date to show for a pass: its expiry; for one ended early (marked expired before its expiry
+// date), "Ended <the day it was changed>" so it doesn't read as valid until a future date
+const expiryLabel = (p: Pass) => {
+  const exp = parseToYMD(p.expiryDate);
+  const today = parseToYMD(new Date());
+  if (isPassExpired(p) && exp && today && exp >= today) {
+    return `Ended ${formatDate(p.updatedAt || p.expiryDate)}`;
+  }
+  return formatDate(p.expiryDate);
 };
 
 const readMatrixExpiredDays = (currentUser: UserProfile | null | undefined): number => {
@@ -479,7 +494,7 @@ export function AccessMatrix({
           }
 
           if (latestPass?.expiryDate) {
-            const formatted = formatDate(latestPass.expiryDate);
+            const formatted = expiryLabel(latestPass);
             const expired = isPassExpired(latestPass);
             const expiry = new Date(latestPass.expiryDate);
             const today = new Date();
@@ -869,7 +884,7 @@ export function AccessMatrix({
                                   return "bg-emerald-50 text-emerald-700 border border-emerald-100";
                                 })()
                               )}>
-                                {formatDate(latestPass.expiryDate)}
+                                {expiryLabel(latestPass)}
                               </span>
                             ) : (
                               <span className="text-[9px] text-[#D1D5DB]">—</span>
@@ -1072,7 +1087,7 @@ export function AccessMatrix({
                                       return "bg-emerald-50 text-emerald-700 border border-emerald-200";
                                     })()
                                   )}>
-                                    {formatDate(latestPass.expiryDate)}
+                                    {expiryLabel(latestPass)}
                                   </span>
                                 ) : (
                                   <span className="text-[9px] text-gray-300">—</span>
