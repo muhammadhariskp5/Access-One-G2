@@ -461,8 +461,10 @@ export function PassSubmissionForm({
   };
 
   const handleCreatedEmployeeSuccess = async (createdEmp?: Employee) => {
-    await onSuccess();
-    
+    // Not onSuccess(): that is "the application was submitted" (it refreshes every list and, in
+    // Application Detail, closes this window). The new person is added to this form right here;
+    // other screens pick them up through live updates.
+
     if (creatingEmployeeRow && importResults) {
       const targetRow = creatingEmployeeRow.row;
       const prefilled = creatingEmployeeRow.prefilled;
